@@ -472,7 +472,7 @@ function extractNaturalHaloDateFilters(query: string | undefined): { datesearch?
   const now = new Date();
 
   const dateRange = (start: Date, end: Date) => ({
-    datesearch: "dateoccured",
+    datesearch: "dateoccurred",
     startdate: formatHaloDate(start),
     enddate: formatHaloDate(addDays(end, 1))
   });
@@ -558,6 +558,15 @@ function extractNaturalHaloDateFilters(query: string | undefined): { datesearch?
     return dateRange(new Date(now.getFullYear() - 1, 0, 1), new Date(now.getFullYear() - 1, 11, 31));
   }
 
+  if (/\byesterday\b/.test(normalized)) {
+    const yesterday = addDays(now, -1);
+    return dateRange(yesterday, yesterday);
+  }
+
+  if (/\btoday\b/.test(normalized)) {
+    return dateRange(now, now);
+  }
+
   // Specific month names: "in January", "in Feb 2025", "January 2025"
   const monthNames = ["january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december"];
   const monthAbbrevs = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
@@ -578,6 +587,46 @@ function extractNaturalHaloDateFilters(query: string | undefined): { datesearch?
   }
 
   return {};
+}
+
+function inferHaloTicketDateSearch(query: string | undefined) {
+  const normalized = query?.toLowerCase() ?? "";
+  if (!normalized) {
+    return "dateoccurred";
+  }
+
+  if (/\b(closed|cleared|resolved|completed|cancelled|canceled|archived)\b/.test(normalized)) {
+    return "dateclosed";
+  }
+
+  if (/\b(updated|actioned|responded|last touched|worked on)\b/.test(normalized)) {
+    return "lastactiondate";
+  }
+
+  return "dateoccurred";
+}
+
+function sanitizeHaloTicketDateFilters(filters: Record<string, unknown>, query: string | undefined) {
+  const sanitized = { ...filters };
+  const hasDateWindow =
+    typeof sanitized.startdate === "string" ||
+    typeof sanitized.enddate === "string";
+
+  if (!hasDateWindow && typeof sanitized.datesearch !== "string") {
+    return sanitized;
+  }
+
+  const rawDateSearch = typeof sanitized.datesearch === "string" ? sanitized.datesearch.trim().toLowerCase() : "";
+  const normalizedDateSearch = rawDateSearch === "dateoccured" ? "dateoccurred" : rawDateSearch;
+  const allowedLifecycleDateSearches = new Set(["dateoccurred", "dateclosed", "dateassigned", "responsedate", "lastactiondate", "last_update"]);
+
+  if (!normalizedDateSearch || !allowedLifecycleDateSearches.has(normalizedDateSearch)) {
+    sanitized.datesearch = inferHaloTicketDateSearch(query);
+  } else {
+    sanitized.datesearch = normalizedDateSearch;
+  }
+
+  return sanitized;
 }
 
 function isNinjaUnauthorizedError(error: unknown) {
@@ -1540,10 +1589,10 @@ export class ConnectorService {
     const shouldApplyNaturalDateFilters =
       !queryWantsOpenItems || typeof input.closed_only === "boolean" || typeof input.closedOnly === "boolean";
     const naturalDateFilters = shouldApplyNaturalDateFilters ? detectedNaturalDateFilters : {};
-    const effectiveFilters: Record<string, unknown> = {
+    const effectiveFilters = sanitizeHaloTicketDateFilters({
       ...naturalDateFilters,
       ...input
-    };
+    }, rawQuery);
     const hasNaturalDateFilter =
       typeof naturalDateFilters.startdate === "string" ||
       typeof naturalDateFilters.enddate === "string" ||

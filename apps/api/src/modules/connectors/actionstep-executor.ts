@@ -54,7 +54,7 @@ async function fetchWithRefresh(
     return fetch(url.toString(), {
       ...init,
       headers: {
-        accept: "application/json",
+        accept: "application/vnd.api+json",
         authorization: `Bearer ${token}`,
         ...(init.headers ?? {})
       }

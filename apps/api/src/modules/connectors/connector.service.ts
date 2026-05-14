@@ -2153,7 +2153,7 @@ export class ConnectorService {
           )
         : []),
       // Category fetch: by client + resolved category tier filters (no text search)
-      // catches tickets where the topic is in the category path, not the summary
+      // catches tickets where the topic is in the category path, not the summarys
       ...(hasResolvedCategories && matchedClientIds.length > 0
         ? matchedClientIds.map((matchedId) =>
             this.fetchHaloTickets(baseUrl, accessToken, {

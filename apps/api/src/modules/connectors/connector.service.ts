@@ -1664,11 +1664,12 @@ export class ConnectorService {
     return this.getConnectorConfig(tenantId, provider);
   }
 
-  async chatWithActionStepAgent(
+  private async buildAgentRequest(
     tenantId: string,
     message: string,
-    history: Array<{ role: "user" | "assistant" | "system"; content: string }>
-  ): Promise<{ reply: string }> {
+    history: Array<{ role: "user" | "assistant" | "system"; content: string }>,
+    stream: boolean
+  ) {
     const stored = ((await this.configStore.get(tenantId, "actionstep"))?.configJson ?? {}) as StoredConnectorConfig;
     const responsesUrl = stored.azureAgentResponsesUrl?.trim();
     const apiKey = stored.azureAgentApiKeyEncrypted
@@ -1698,15 +1699,48 @@ export class ConnectorService {
       buildItem("user", message)
     ];
 
-    const response = await fetch(responsesUrl, {
-      method: "POST",
+    return {
+      url: responsesUrl,
       headers: {
         "content-type": "application/json",
-        accept: "application/json",
+        accept: stream ? "text/event-stream" : "application/json",
         "api-key": apiKey,
         authorization: `Bearer ${apiKey}`
-      },
-      body: JSON.stringify({ input: inputItems })
+      } satisfies Record<string, string>,
+      body: JSON.stringify({ input: inputItems, stream })
+    };
+  }
+
+  async streamAgentChat(
+    tenantId: string,
+    message: string,
+    history: Array<{ role: "user" | "assistant" | "system"; content: string }>
+  ): Promise<Response> {
+    const request = await this.buildAgentRequest(tenantId, message, history, true);
+    const response = await fetch(request.url, {
+      method: "POST",
+      headers: request.headers,
+      body: request.body
+    });
+
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`Azure Foundry chat failed (${response.status}): ${text.slice(0, 300)}`);
+    }
+
+    return response;
+  }
+
+  async chatWithActionStepAgent(
+    tenantId: string,
+    message: string,
+    history: Array<{ role: "user" | "assistant" | "system"; content: string }>
+  ): Promise<{ reply: string }> {
+    const request = await this.buildAgentRequest(tenantId, message, history, false);
+    const response = await fetch(request.url, {
+      method: "POST",
+      headers: request.headers,
+      body: request.body
     });
 
     const text = await response.text();

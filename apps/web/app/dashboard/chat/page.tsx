@@ -6,8 +6,8 @@ export default function ChatPage() {
     <div className="stack">
       <PageHeader
         eyebrow="Chat"
-        title="Talk to the Nexian agent"
-        description="The agent can reach any tool wired into this workspace — matters, tickets, contacts, workflows, and more."
+        title="Talk to the Nexian AI agent"
+        description="The agent is connected to your tools so can assist with anything you need"
       />
       <AgentChat />
     </div>

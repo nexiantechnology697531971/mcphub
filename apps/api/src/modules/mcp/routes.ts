@@ -714,6 +714,75 @@ export function registerApiRoutes(
     }
   });
 
+  app.post("/connectors/actionstep/chat/stream", async (request, reply) => {
+    const auth = parsePlatformAuth(request.headers.authorization, deps.authService);
+    if (!auth) {
+      return reply.status(401).send({ error: "unauthorized" });
+    }
+
+    const body = z
+      .object({
+        message: z.string().min(1).max(8000),
+        history: z
+          .array(
+            z.object({
+              role: z.enum(["user", "assistant", "system"]),
+              content: z.string().max(8000)
+            })
+          )
+          .max(40)
+          .default([])
+      })
+      .parse(request.body ?? {});
+
+    let upstream: Response;
+    try {
+      upstream = await deps.connectorService.streamAgentChat(auth.tenantId, body.message, body.history);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Could not reach the ActionStep agent.";
+      return reply.status(502).send({ error: "chat_failed", message });
+    }
+
+    if (!upstream.body) {
+      return reply.status(502).send({ error: "chat_failed", message: "Empty stream from agent." });
+    }
+
+    reply.hijack();
+    const raw = reply.raw;
+    raw.writeHead(200, {
+      "content-type": "text/event-stream; charset=utf-8",
+      "cache-control": "no-cache, no-transform",
+      connection: "keep-alive",
+      "x-accel-buffering": "no"
+    });
+    raw.flushHeaders?.();
+
+    const reader = upstream.body.getReader();
+    const close = () => {
+      try {
+        raw.end();
+      } catch {
+        /* already closed */
+      }
+    };
+    raw.on("close", () => {
+      void reader.cancel().catch(() => undefined);
+    });
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (value) raw.write(value);
+      }
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : "stream error";
+      raw.write(`event: error\ndata: ${JSON.stringify({ message: detail })}\n\n`);
+    } finally {
+      close();
+    }
+  });
+
   app.get("/connectors/n8n/workflows", async (request, reply) => {
     const auth = parsePlatformAuth(request.headers.authorization, deps.authService);
     if (!auth) {

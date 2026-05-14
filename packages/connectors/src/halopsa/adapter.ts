@@ -84,32 +84,43 @@ const haloTicketFiltersSchema = z.object({
 });
 
 const haloUserFiltersSchema = z.object({
-  query: z.string().optional(),
-  paginate: z.boolean().optional(),
-  page_size: z.number().int().positive().max(200).optional(),
-  page_no: z.number().int().positive().optional(),
-  order: z.string().optional(),
-  orderdesc: z.boolean().optional(),
-  search: z.string().optional(),
-  search_phonenumbers: z.boolean().optional(),
-  toplevel_id: z.number().int().optional(),
-  client_id: z.number().int().optional(),
-  site_id: z.number().int().optional(),
-  organisation_id: z.number().int().optional(),
-  department_id: z.number().int().optional(),
-  asset_id: z.number().int().optional(),
-  includeactive: z.boolean().optional(),
-  includeinactive: z.boolean().optional(),
-  approversonly: z.boolean().optional(),
-  excludeagents: z.boolean().optional(),
-  count: z.number().int().positive().max(250).optional(),
-  clientId: z.number().int().optional(),
-  siteId: z.number().int().optional(),
-  organisationId: z.number().int().optional(),
-  departmentId: z.number().int().optional(),
-  assetId: z.number().int().optional(),
-  includeActive: z.boolean().optional(),
-  includeInactive: z.boolean().optional()
+  query: z
+    .string()
+    .min(1)
+    .describe("Free text — searches name, email, phone, username. Required unless filtering by an ID below.")
+    .optional(),
+  client_id: z
+    .number()
+    .int()
+    .positive()
+    .describe("Only set if you already have the customer/client ID. Omit otherwise — do not pass 0.")
+    .optional(),
+  site_id: z
+    .number()
+    .int()
+    .positive()
+    .describe("Only set if filtering to a known site ID. Omit otherwise — do not pass 0.")
+    .optional(),
+  department_id: z
+    .number()
+    .int()
+    .positive()
+    .describe("Only set if filtering to a known department ID. Omit otherwise — do not pass 0.")
+    .optional(),
+  asset_id: z
+    .number()
+    .int()
+    .positive()
+    .describe("Only set if filtering to a known asset ID. Omit otherwise — do not pass 0.")
+    .optional(),
+  includeinactive: z.boolean().describe("Set true to also return inactive users.").optional(),
+  count: z
+    .number()
+    .int()
+    .positive()
+    .max(100)
+    .describe("Max results to return (defaults to 25).")
+    .optional()
 });
 
 const haloListOpenTicketsTool: ConnectorToolDefinition<z.infer<typeof haloTicketFiltersSchema>, NormalizedToolResponse> = {
@@ -136,7 +147,7 @@ const haloListOpenTicketsTool: ConnectorToolDefinition<z.infer<typeof haloTicket
 const haloFindContactTool: ConnectorToolDefinition<z.infer<typeof haloUserFiltersSchema>, NormalizedToolResponse> = {
   name: "find_contact",
   description:
-    "Use when the user wants a HaloPSA end user, requester, or contact by name, email, phone, client, site, department, or asset assignment. Supports Halo /users filters including client_id, site_id, organisation_id, department_id, asset_id, includeactive, includeinactive, search_phonenumbers, pagination, and ordering.",
+    "Find a HaloPSA end user / requester / contact by name, email, phone, or username. Pass the user's name (or email) as `query` — DO NOT fill optional ID filters (client_id, site_id, department_id, asset_id) with 0 or placeholder values; omit them entirely unless you already know the real ID. Returns id, name, email, phone, customer, site, and active status.",
   inputSchema: haloUserFiltersSchema,
   async execute(context, input) {
     return {

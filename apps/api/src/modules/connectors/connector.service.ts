@@ -146,6 +146,17 @@ function appendQueryValue(url: URL, key: string, value: unknown) {
   url.searchParams.set(key, normalized);
 }
 
+function pickPositiveInt(record: Record<string, unknown>, keys: string[]): number | undefined {
+  for (const key of keys) {
+    const value = record[key];
+    const n = typeof value === "number" ? value : typeof value === "string" && value.trim() ? Number(value) : NaN;
+    if (Number.isFinite(n) && n > 0) {
+      return Math.floor(n);
+    }
+  }
+  return undefined;
+}
+
 function buildHaloOpenRuleFields(ticket: HaloTicketRecord, resolvedStatus: string | undefined) {
   return {
     statusResolvedFromHalo: resolvedStatus ?? "Unknown",
@@ -2189,32 +2200,52 @@ export class ConnectorService {
 
   private async lookupHaloUsers(baseUrl: string, accessToken: string, options: Record<string, unknown>) {
     const url = new URL(`${baseUrl}/api/users`);
+
+    const searchTerm = pickString(options, ["search", "query"]);
+    const requestedCount = pickPositiveInt(options, ["count"]);
+    const requestedPageSize = pickPositiveInt(options, ["page_size"]);
+    const requestedPageNo = pickPositiveInt(options, ["page_no"]);
+    const effectiveCount = Math.min(requestedCount ?? 25, 250);
+    const effectivePageSize = requestedPageSize && requestedPageSize >= 5 ? requestedPageSize : undefined;
+
     appendQueryValue(url, "paginate", typeof options.paginate === "boolean" ? options.paginate : undefined);
-    appendQueryValue(url, "page_size", pickNumber(options, ["page_size"]));
-    appendQueryValue(url, "page_no", pickNumber(options, ["page_no"]));
+    appendQueryValue(url, "page_size", effectivePageSize);
+    appendQueryValue(url, "page_no", requestedPageNo);
     appendQueryValue(url, "order", pickString(options, ["order"]));
     appendQueryValue(url, "orderdesc", typeof options.orderdesc === "boolean" ? options.orderdesc : undefined);
-    appendQueryValue(url, "search", pickString(options, ["search", "query"]));
+    appendQueryValue(url, "search", searchTerm);
     appendQueryValue(
       url,
       "search_phonenumbers",
       typeof options.search_phonenumbers === "boolean" ? options.search_phonenumbers : undefined
     );
-    appendQueryValue(url, "toplevel_id", pickNumber(options, ["toplevel_id"]));
-    appendQueryValue(url, "client_id", pickNumber(options, ["client_id", "clientId"]));
-    appendQueryValue(url, "site_id", pickNumber(options, ["site_id", "siteId"]));
-    appendQueryValue(url, "organisation_id", pickNumber(options, ["organisation_id", "organisationId"]));
-    appendQueryValue(url, "department_id", pickNumber(options, ["department_id", "departmentId"]));
-    appendQueryValue(url, "asset_id", pickNumber(options, ["asset_id", "assetId"]));
-    appendQueryValue(url, "includeactive", typeof options.includeactive === "boolean" ? options.includeactive : options.includeActive);
+    appendQueryValue(url, "toplevel_id", pickPositiveInt(options, ["toplevel_id"]));
+    appendQueryValue(url, "client_id", pickPositiveInt(options, ["client_id", "clientId"]));
+    appendQueryValue(url, "site_id", pickPositiveInt(options, ["site_id", "siteId"]));
+    appendQueryValue(url, "organisation_id", pickPositiveInt(options, ["organisation_id", "organisationId"]));
+    appendQueryValue(url, "department_id", pickPositiveInt(options, ["department_id", "departmentId"]));
+    appendQueryValue(url, "asset_id", pickPositiveInt(options, ["asset_id", "assetId"]));
+    appendQueryValue(
+      url,
+      "includeactive",
+      typeof options.includeactive === "boolean"
+        ? options.includeactive
+        : typeof options.includeActive === "boolean"
+          ? options.includeActive
+          : undefined
+    );
     appendQueryValue(
       url,
       "includeinactive",
-      typeof options.includeinactive === "boolean" ? options.includeinactive : options.includeInactive
+      typeof options.includeinactive === "boolean"
+        ? options.includeinactive
+        : typeof options.includeInactive === "boolean"
+          ? options.includeInactive
+          : undefined
     );
     appendQueryValue(url, "approversonly", typeof options.approversonly === "boolean" ? options.approversonly : undefined);
     appendQueryValue(url, "excludeagents", typeof options.excludeagents === "boolean" ? options.excludeagents : undefined);
-    appendQueryValue(url, "count", pickNumber(options, ["count"]) ?? 25);
+    appendQueryValue(url, "count", effectiveCount);
 
     const response = await haloFetch(url, {
       headers: buildHaloHeaders(accessToken)
@@ -2226,7 +2257,39 @@ export class ConnectorService {
     }
 
     const payload = (await response.json()) as unknown;
-    return normalizeCollectionPayload(payload, ["users", "contacts", "results", "data"]);
+    let users = normalizeCollectionPayload(payload, ["users", "contacts", "results", "data"]);
+
+    // Halo's /api/users search is exact-token biased and often misses partial/whole-name queries.
+    // Retry with split tokens if nothing came back, then merge unique users.
+    if (users.length === 0 && searchTerm) {
+      const tokens = searchTerm.split(/\s+/).filter((token) => token.length >= 2);
+      const seen = new Set<number>();
+      const collected: HaloGenericRecord[] = [];
+
+      for (const token of tokens) {
+        if (collected.length >= effectiveCount) break;
+        const retryUrl = new URL(`${baseUrl}/api/users`);
+        retryUrl.searchParams.set("search", token);
+        retryUrl.searchParams.set("count", String(effectiveCount));
+        const retryResponse = await haloFetch(retryUrl, { headers: buildHaloHeaders(accessToken) });
+        if (!retryResponse.ok) continue;
+        const retryPayload = (await retryResponse.json()) as unknown;
+        const tokenUsers = normalizeCollectionPayload(retryPayload, ["users", "contacts", "results", "data"]);
+        for (const user of tokenUsers) {
+          const id = pickNumber(user, ["id", "user_id", "contact_id"]);
+          const dedupeKey = id ?? Number.NaN;
+          if (id !== undefined && seen.has(dedupeKey)) continue;
+          if (id !== undefined) seen.add(dedupeKey);
+          collected.push(user);
+        }
+      }
+
+      if (collected.length > 0) {
+        users = collected;
+      }
+    }
+
+    return users;
   }
 
   private async fetchHaloTickets(
@@ -2866,7 +2929,7 @@ export class ConnectorService {
         status: pickString(project, ["status_name", "status"]),
         customer: pickString(project, ["client_name", "customer_name", "organisation_name"]),
         manager: pickString(project, ["project_manager", "agent_name", "owner_name"]),
-        raw: project
+        ...(isTruthyFlag(input, ["include_raw", "includeRaw", "raw", "full"]) ? { raw: project } : {})
       })),
       source: "halopsa"
     };
@@ -2874,20 +2937,25 @@ export class ConnectorService {
 
   private async findHaloContact(baseUrl: string, accessToken: string, input: Record<string, unknown>) {
     const query = typeof input.query === "string" ? input.query.trim() : pickString(input, ["search"]) ?? "";
-    if (!query && Object.keys(input).length === 0) {
-      throw new Error("find_contact requires a query or user filters");
+    const hasAnyFilter =
+      pickPositiveInt(input, ["client_id", "clientId", "site_id", "siteId", "department_id", "departmentId", "asset_id", "assetId", "organisation_id", "organisationId"]) !== undefined;
+    if (!query && !hasAnyFilter) {
+      throw new Error("find_contact requires a query (name/email/phone) or a real id filter");
     }
+
+    const includeRaw = isTruthyFlag(input, ["include_raw", "includeRaw", "raw", "full"]);
+    const requestedCount = pickPositiveInt(input, ["count"]) ?? 25;
 
     const contacts = (await this.lookupHaloUsers(baseUrl, accessToken, {
       ...input,
       query,
-      count: pickNumber(input, ["count"]) ?? 25
-    })).slice(0, 25);
+      count: requestedCount
+    })).slice(0, requestedCount);
 
     return {
       summary:
         contacts.length > 0
-          ? `Found ${contacts.length} HaloPSA users. Results include user id, name, email, phone, customer, site, department, active status, and raw user details where available.`
+          ? `Found ${contacts.length} HaloPSA users. Results include user id, name, email, phone, customer, site, department, and active status.${includeRaw ? "" : " Pass include_raw: true to also return the full Halo user payload."}`
           : "No HaloPSA users matched that query.",
       data: contacts.map((contact) => ({
         id: pickNumber(contact, ["id", "user_id", "contact_id"]),
@@ -2900,7 +2968,7 @@ export class ConnectorService {
         department: pickString(contact, ["department_name", "department"]),
         username: pickString(contact, ["username", "user_name", "samaccountname"]),
         active: typeof contact.inactive === "boolean" ? !contact.inactive : undefined,
-        raw: contact
+        ...(includeRaw ? { raw: contact } : {})
       })),
       source: "halopsa"
     };
@@ -2937,9 +3005,9 @@ export class ConnectorService {
         id: pickNumber(document, ["id", "kbarticle_id", "article_id"]),
         title: pickString(document, ["title", "summary", "name"]),
         category: pickString(document, ["category", "category_name"]),
-        excerpt: pickString(document, ["excerpt", "summary_text", "short_description"]),
+        excerpt: truncateText(stripHtmlToText(document.excerpt ?? document.summary_text ?? document.short_description), 1000),
         updatedAt: pickString(document, ["dateupdated", "updated_at", "lastmodified"]),
-        raw: document
+        ...(isTruthyFlag(input, ["include_raw", "includeRaw", "raw", "full"]) ? { raw: document } : {})
       })),
       source: "halopsa"
     };
@@ -3004,7 +3072,7 @@ export class ConnectorService {
         site: pickString(asset, ["site_name", "location_name"]),
         status: pickString(asset, ["status_name", "status"]),
         serialNumber: pickString(asset, ["serial_number", "serialno"]),
-        raw: asset
+        ...(isTruthyFlag(input, ["include_raw", "includeRaw", "raw", "full"]) ? { raw: asset } : {})
       })),
       source: "halopsa"
     };
@@ -3262,7 +3330,7 @@ export class ConnectorService {
     return "";
   }
 
-  private mapNinjaOneDevice(device: Record<string, unknown>) {
+  private mapNinjaOneDevice(device: Record<string, unknown>, options: { includeRaw?: boolean } = {}) {
     return {
       id: pickNumber(device, ["id", "deviceId", "device_id"]),
       name: pickString(device, ["systemName", "displayName", "name", "hostname"]),
@@ -3274,7 +3342,7 @@ export class ConnectorService {
       os: pickString(device, ["osName", "operatingSystem", "os"]),
       serialNumber: pickString(device, ["serialNumber", "serial"]),
       lastSeen: pickString(device, ["lastContact", "lastSeen", "lastLoggedInUser"]),
-      raw: device
+      ...(options.includeRaw ? { raw: device } : {})
     };
   }
 
@@ -3991,7 +4059,7 @@ export class ConnectorService {
         status: pickString(invoice, ["status_name", "status"]),
         total: pickString(invoice, ["total", "amount", "grand_total"]),
         issuedAt: pickString(invoice, ["date", "issued_at", "invoice_date"]),
-        raw: invoice
+        ...(isTruthyFlag(input, ["include_raw", "includeRaw", "raw", "full"]) ? { raw: invoice } : {})
       })),
       source: "halopsa"
     };
@@ -4033,7 +4101,7 @@ export class ConnectorService {
           id: pickNumber(ticket, ["id", "ticket_id", "TicketID"]),
           summary: pickString(ticket, ["summary", "subject", "title"]),
           status: getHaloTicketStatus(ticket),
-          raw: ticket
+          ...(isTruthyFlag(input, ["include_raw", "includeRaw", "raw", "full"]) ? { raw: ticket } : {})
         }
       ],
       source: "halopsa"
@@ -4116,7 +4184,7 @@ export class ConnectorService {
           id: pickNumber(action, ["id", "action_id"]),
           ticketId: pickNumber(action, ["ticket_id", "ticketid"]),
           note: pickString(action, ["note", "note_html", "outcome"]) ?? note,
-          raw: action
+          ...(isTruthyFlag(input, ["include_raw", "includeRaw", "raw", "full"]) ? { raw: action } : {})
         }
       ],
       source: "halopsa"
@@ -4185,12 +4253,13 @@ export class ConnectorService {
       throw new Error("find_customer requires a query");
     }
 
+    const includeRaw = isTruthyFlag(input, ["include_raw", "includeRaw", "raw", "full"]);
     const clients = await this.lookupHaloCustomers(baseUrl, accessToken, query, 25);
 
     return {
       summary:
         clients.length > 0
-          ? `Found ${clients.length} HaloPSA customers. Results include customer id, name, reference, email, and phone where available.`
+          ? `Found ${clients.length} HaloPSA customers. Results include customer id, name, reference, email, and phone where available.${includeRaw ? "" : " Pass include_raw: true for the full Halo client payload."}`
           : "No HaloPSA customers matched that query.",
       data: clients.map((client) => ({
         id: pickNumber(client, ["id", "client_id"]),
@@ -4198,7 +4267,7 @@ export class ConnectorService {
         reference: pickString(client, ["reference", "client_reference", "ref"]),
         email: pickString(client, ["email", "main_email"]),
         phone: pickString(client, ["phone", "main_phone"]),
-        raw: client
+        ...(includeRaw ? { raw: client } : {})
       })),
       source: "halopsa"
     };

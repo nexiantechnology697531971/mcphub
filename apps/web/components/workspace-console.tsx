@@ -372,9 +372,9 @@ export function WorkspaceConsole({
       return;
     }
 
-    setConnectorConfigs({});
     const sessionToken = session.token;
     const tenantName = session.tenant.name;
+    let cancelled = false;
 
     async function loadConnectorConfigs() {
       try {
@@ -411,8 +411,18 @@ export function WorkspaceConsole({
           })
         );
 
+        if (cancelled) return;
+
         const nextConfigs = Object.fromEntries(entries);
-        setConnectorConfigs(nextConfigs);
+        setConnectorConfigs((current) => {
+          const merged: Record<string, ConnectorConfig> = { ...current };
+          for (const [id, loaded] of Object.entries(nextConfigs)) {
+            if (!merged[id]) {
+              merged[id] = loaded;
+            }
+          }
+          return merged;
+        });
         setState((current) => ({
           ...current,
           connectors: current.connectors.map((connector) =>
@@ -430,6 +440,9 @@ export function WorkspaceConsole({
     }
 
     void loadConnectorConfigs();
+    return () => {
+      cancelled = true;
+    };
   }, [apiOrigin, session, visibleProviders]);
 
   const visibleConnectors = useMemo(
@@ -802,7 +815,7 @@ export function WorkspaceConsole({
               <label className="stack">
                 <span className="field-label">Environment</span>
                 <select
-                  value={selectedConfig.environment ?? "production"}
+                  value={selectedConfig.environment === "staging" ? "staging" : "production"}
                   onChange={(event) => updateConnectorConfig(selected.id, { environment: event.target.value })}
                 >
                   <option value="production">Production (go.actionstep.com)</option>

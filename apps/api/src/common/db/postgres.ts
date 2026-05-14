@@ -195,6 +195,70 @@ export async function ensureDatabaseSchema() {
         CREATE INDEX IF NOT EXISTS audit_events_tenant_created_idx
         ON audit_events (tenant_id, created_at DESC);
       `);
+
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS modules (
+          id TEXT PRIMARY KEY,
+          slug TEXT NOT NULL UNIQUE,
+          name TEXT NOT NULL,
+          description TEXT NULL,
+          enabled_by_default BOOLEAN NOT NULL DEFAULT TRUE,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+      `);
+
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS module_connectors (
+          provider TEXT PRIMARY KEY,
+          module_id TEXT NOT NULL REFERENCES modules(id) ON DELETE CASCADE,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+      `);
+
+      await pool.query(`
+        CREATE INDEX IF NOT EXISTS module_connectors_module_idx
+        ON module_connectors (module_id);
+      `);
+
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS tenant_modules (
+          tenant_id TEXT NOT NULL,
+          module_id TEXT NOT NULL REFERENCES modules(id) ON DELETE CASCADE,
+          enabled BOOLEAN NOT NULL,
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          PRIMARY KEY (tenant_id, module_id)
+        );
+      `);
+
+      await pool.query(`
+        CREATE INDEX IF NOT EXISTS tenant_modules_tenant_idx
+        ON tenant_modules (tenant_id);
+      `);
+
+      await pool.query(`
+        INSERT INTO modules (id, slug, name, description, enabled_by_default)
+        VALUES
+          ('mod_msp', 'msp', 'MSP', 'Managed service provider tooling: PSA, RMM, M365 tenancy.', TRUE),
+          ('mod_legal', 'legal', 'Legal', 'Legal practice management: ActionStep, SharePoint matters.', FALSE),
+          ('mod_workflow', 'workflow', 'Workflow', 'Workflow automation tooling (n8n, internal automations).', TRUE),
+          ('mod_microsoft365', 'microsoft365', 'Microsoft 365', 'SharePoint, OneDrive, Exchange tooling.', TRUE)
+        ON CONFLICT (id) DO NOTHING;
+      `);
+
+      await pool.query(`
+        INSERT INTO module_connectors (provider, module_id)
+        VALUES
+          ('halopsa', 'mod_msp'),
+          ('ninjaone', 'mod_msp'),
+          ('cipp', 'mod_msp'),
+          ('itglue', 'mod_msp'),
+          ('actionstep', 'mod_legal'),
+          ('n8n', 'mod_workflow'),
+          ('microsoft365', 'mod_microsoft365'),
+          ('hubspot', 'mod_workflow')
+        ON CONFLICT (provider) DO NOTHING;
+      `);
     })();
   }
 

@@ -12,7 +12,9 @@ import { createOAuthState, verifyOAuthState } from "../../common/security/oauth-
 import { ConnectorConfigStore } from "../../common/store/connector-config.store";
 import { ConnectedAccountStore } from "../../common/store/connected-account.store";
 import type { AuditService } from "../audit/audit.service";
+import type { ModuleService } from "../modules/module.service";
 
+import { executeActionStepTool } from "./actionstep-executor";
 import { TokenRefreshService } from "./token-refresh.service";
 
 const config = buildAppConfig();
@@ -31,6 +33,8 @@ type StoredConnectorConfig = {
   tenantId?: string;
   appId?: string;
   webhookBaseUrl?: string;
+  apiEndpoint?: string;
+  environment?: string;
 };
 
 type N8nWorkflowRecord = Record<string, unknown>;
@@ -1152,30 +1156,51 @@ export class ConnectorService {
   private readonly haloStatusCache = new HaloRecordCache<HaloStatusRecord>(this.redis, "status", 5 * 60 * 1000);
   private readonly haloCategoryCache = new HaloRecordCache<HaloCategoryRecord>(this.redis, "category", 10 * 60 * 1000);
 
-  constructor(private readonly auditService: AuditService) {
+  constructor(
+    private readonly auditService: AuditService,
+    private readonly moduleService: ModuleService
+  ) {
     this.redis?.on("error", (error) => {
       console.warn("[redis]", error.message);
     });
   }
 
+  private async getEnabledProvidersForTenant(tenantId: string | undefined) {
+    if (!tenantId) return undefined;
+    const { enabledProviders } = await this.moduleService.getEnabledProvidersForTenant(tenantId);
+    return enabledProviders;
+  }
+
   async getProviders(tenantId?: string, userId?: string) {
     const accounts = tenantId && userId ? await this.store.findByTenantUser(tenantId, userId) : [];
+    const enabled = await this.getEnabledProvidersForTenant(tenantId);
 
-    return [...this.registry.values()].map((adapter) => {
-      const account = accounts.find((candidate) => candidate.provider === adapter.provider);
-      return {
-        provider: adapter.provider,
-        displayName: adapter.displayName,
-        supportsOAuth: adapter.supportsOAuth,
-        status: account?.status ?? "DISCONNECTED",
-        connected: Boolean(account),
-        lastError: account?.lastError,
-        toolNames: adapter.getTools().map((tool) => tool.name)
-      };
-    });
+    return [...this.registry.values()]
+      .filter((adapter) => !enabled || enabled.has(adapter.provider))
+      .map((adapter) => {
+        const account = accounts.find((candidate) => candidate.provider === adapter.provider);
+        return {
+          provider: adapter.provider,
+          displayName: adapter.displayName,
+          supportsOAuth: adapter.supportsOAuth,
+          status: account?.status ?? "DISCONNECTED",
+          connected: Boolean(account),
+          lastError: account?.lastError,
+          toolNames: adapter.getTools().map((tool) => tool.name)
+        };
+      });
+  }
+
+  private async assertProviderEnabledForTenant(provider: ProviderName, tenantId: string) {
+    const enabled = await this.getEnabledProvidersForTenant(tenantId);
+    if (enabled && !enabled.has(provider)) {
+      throw new Error(`Connector ${provider} is not enabled for this tenant`);
+    }
   }
 
   async beginOAuth(provider: ProviderName, tenantId: string, userId: string, returnTo?: string) {
+    await this.assertProviderEnabledForTenant(provider, tenantId);
+
     if (provider === "halopsa") {
       const haloConfig = await this.resolveHaloConfig(tenantId);
       const state = createOAuthState({ provider, tenantId, userId, returnTo }, config.oauthStateSigningSecret);
@@ -1206,6 +1231,19 @@ export class ConnectorService {
       });
 
       return { authorizationUrl: `${ninjaConfig.authUrl}/ws/oauth/authorize?${params.toString()}` };
+    }
+
+    if (provider === "actionstep") {
+      const asConfig = await this.resolveActionStepConfig(tenantId);
+      const state = createOAuthState({ provider, tenantId, userId, returnTo }, config.oauthStateSigningSecret);
+      const params = new URLSearchParams({
+        response_type: "code",
+        client_id: asConfig.clientId,
+        redirect_uri: asConfig.redirectUri,
+        scope: asConfig.scopes.join(" "),
+        state
+      });
+      return { authorizationUrl: `${asConfig.authorizeUrl}?${params.toString()}` };
     }
 
     const adapter = this.registry.get(provider);
@@ -1334,6 +1372,70 @@ export class ConnectorService {
       };
     }
 
+    if (provider === "actionstep") {
+      const payload = verifyOAuthState(state, config.oauthStateSigningSecret);
+      const asConfig = await this.resolveActionStepConfig(payload.tenantId);
+      const tokens = await this.exchangeActionStepToken(
+        asConfig,
+        new URLSearchParams({
+          grant_type: "authorization_code",
+          client_id: asConfig.clientId,
+          client_secret: asConfig.clientSecret,
+          code,
+          redirect_uri: asConfig.redirectUri
+        })
+      );
+
+      if (!tokens.apiEndpoint) {
+        throw new Error(
+          "ActionStep token response did not include api_endpoint — cannot determine the regional API base URL"
+        );
+      }
+
+      const now = new Date();
+      const account: ConnectedAccountRecord = {
+        id: crypto.randomUUID(),
+        tenantId: payload.tenantId,
+        userId: payload.userId,
+        provider,
+        providerAccountId: payload.userId,
+        accessTokenEncrypted: this.encryption.encrypt(tokens.accessToken),
+        refreshTokenEncrypted: tokens.refreshToken ? this.encryption.encrypt(tokens.refreshToken) : undefined,
+        expiresAt: tokens.expiresAt,
+        scopes: tokens.scopes ?? asConfig.scopes,
+        metadataJson: {
+          connectedVia: "oauth_authorization_code",
+          apiEndpoint: tokens.apiEndpoint,
+          environment: asConfig.environment,
+          clientId: asConfig.clientId,
+          redirectUri: asConfig.redirectUri,
+          scopes: tokens.scopes ?? asConfig.scopes
+        },
+        status: "ACTIVE",
+        lastError: undefined,
+        createdAt: now,
+        updatedAt: now
+      };
+
+      await this.store.upsert(account);
+      await this.auditService.log({
+        tenantId: payload.tenantId,
+        userId: payload.userId,
+        action: "CONNECTOR_CONNECTED",
+        targetType: "connected_account",
+        metadata: { provider, apiEndpoint: tokens.apiEndpoint }
+      });
+
+      return {
+        returnTo: payload.returnTo ?? `${config.appUrl}/dashboard/connectors`,
+        tenantId: payload.tenantId,
+        userId: payload.userId,
+        provider,
+        expiresAt: tokens.expiresAt,
+        scopes: tokens.scopes ?? asConfig.scopes
+      };
+    }
+
     const adapter = this.registry.get(provider);
     if (!adapter?.exchangeCode) {
       throw new Error(`Provider ${provider} does not support token exchange`);
@@ -1446,6 +1548,20 @@ export class ConnectorService {
             apiUrl: configJson.apiUrl ?? "",
             clientId: configJson.clientId ?? "",
             redirectUri: configJson.webhookBaseUrl ?? "",
+            hasClientSecret: Boolean(configJson.clientSecretEncrypted)
+          }
+        };
+      case "actionstep":
+        return {
+          provider,
+          config: {
+            clientId: configJson.clientId ?? "",
+            redirectUri:
+              configJson.redirectUri
+              ?? process.env.ACTIONSTEP_REDIRECT_URI
+              ?? `${config.apiUrl}/oauth/actionstep/callback`,
+            scopes: (configJson.scopes ?? this.getDefaultActionStepScopes()).join(" "),
+            environment: configJson.environment ?? process.env.ACTIONSTEP_ENV ?? "production",
             hasClientSecret: Boolean(configJson.clientSecretEncrypted)
           }
         };
@@ -1622,12 +1738,35 @@ export class ConnectorService {
       throw new Error(`Unknown tool ${toolName}`);
     }
 
+    await this.assertProviderEnabledForTenant(provider.provider, tenantId);
+
     if (provider.provider === "halopsa") {
       return this.executeHaloTool(tenantId, userId, roles, toolName, input);
     }
 
     if (provider.provider === "ninjaone") {
       return this.executeNinjaOneTool(tenantId, userId, roles, toolName, input);
+    }
+
+    if (provider.provider === "actionstep") {
+      const account = (await this.store.findByTenantUser(tenantId, userId)).find(
+        (candidate) => candidate.provider === "actionstep" && candidate.status === "ACTIVE"
+      );
+
+      if (!account) {
+        throw new Error(`No active ActionStep account found for ${tenantId}/${userId}`);
+      }
+
+      const fresh = await this.ensureFreshAccount(account);
+      return executeActionStepTool(
+        {
+          encryption: this.encryption,
+          ensureFresh: (acc) => this.ensureFreshAccount(acc)
+        },
+        fresh,
+        toolName,
+        input
+      );
     }
 
     const tool = provider.getTools().find((candidate) => candidate.name === toolName);
@@ -4328,6 +4467,35 @@ export class ConnectorService {
     return normalized.endsWith("/oauth/ninjaone/callback") ? normalized : `${normalized}/oauth/ninjaone/callback`;
   }
 
+  private normalizeActionStepRedirectUri(value: string | undefined) {
+    const normalized = this.normalizeApiUrl(value);
+    if (!normalized) {
+      return undefined;
+    }
+
+    return normalized.endsWith("/oauth/actionstep/callback") ? normalized : `${normalized}/oauth/actionstep/callback`;
+  }
+
+  private getDefaultActionStepScopes() {
+    return (process.env.ACTIONSTEP_SCOPES ?? "actions participants tasks timeentries")
+      .split(/\s+/)
+      .filter(Boolean);
+  }
+
+  private getActionStepEnvironmentUrls(environment?: string) {
+    const env = (environment ?? process.env.ACTIONSTEP_ENV ?? "production").toLowerCase();
+    if (env === "staging") {
+      return {
+        authorizeUrl: "https://go.actionstepstaging.com/api/oauth/authorize",
+        tokenUrl: "https://api.actionstepstaging.com/api/oauth/token"
+      };
+    }
+    return {
+      authorizeUrl: "https://go.actionstep.com/api/oauth/authorize",
+      tokenUrl: "https://api.actionstep.com/api/oauth/token"
+    };
+  }
+
   private parseScopes(value: unknown, fallback: string[]) {
     if (Array.isArray(value)) {
       const scopes = value.map((item) => String(item).trim()).filter(Boolean);
@@ -4403,6 +4571,20 @@ export class ConnectorService {
           clientSecretEncrypted,
           webhookBaseUrl: this.normalizeApiUrl(this.readOptionalString(input, "redirectUri")) ?? existing.webhookBaseUrl
         } satisfies StoredConnectorConfig;
+      case "actionstep":
+        return {
+          clientId,
+          clientSecretEncrypted,
+          redirectUri:
+            this.normalizeActionStepRedirectUri(this.readOptionalString(input, "redirectUri") ?? existing.redirectUri)
+            ?? this.normalizeActionStepRedirectUri(process.env.ACTIONSTEP_REDIRECT_URI)
+            ?? `${config.apiUrl}/oauth/actionstep/callback`,
+          scopes: this.parseScopes(input.scopes, existing.scopes ?? this.getDefaultActionStepScopes()),
+          environment:
+            this.readOptionalString(input, "environment")?.toLowerCase()
+            ?? existing.environment
+            ?? "production"
+        } satisfies StoredConnectorConfig;
       default:
         return existing;
     }
@@ -4460,6 +4642,65 @@ export class ConnectorService {
     return {
       apiUrl: apiUrl.replace(/\/$/, ""),
       apiKey
+    };
+  }
+
+  private async resolveActionStepConfig(tenantId: string) {
+    const stored = ((await this.configStore.get(tenantId, "actionstep"))?.configJson ?? {}) as StoredConnectorConfig;
+    const clientId = stored.clientId ?? process.env.ACTIONSTEP_CLIENT_ID;
+    const clientSecret = stored.clientSecretEncrypted
+      ? this.encryption.decrypt(stored.clientSecretEncrypted)
+      : process.env.ACTIONSTEP_CLIENT_SECRET;
+    const redirectUri =
+      this.normalizeActionStepRedirectUri(stored.redirectUri)
+      ?? this.normalizeActionStepRedirectUri(process.env.ACTIONSTEP_REDIRECT_URI)
+      ?? `${config.apiUrl}/oauth/actionstep/callback`;
+    const scopes = stored.scopes ?? this.getDefaultActionStepScopes();
+    const environment = stored.environment ?? process.env.ACTIONSTEP_ENV ?? "production";
+    const { authorizeUrl, tokenUrl } = this.getActionStepEnvironmentUrls(environment);
+
+    if (!clientId || !clientSecret) {
+      throw new Error(
+        "ActionStep requires client ID and client secret in connector settings before connecting"
+      );
+    }
+
+    return { clientId, clientSecret, redirectUri, scopes, environment, authorizeUrl, tokenUrl };
+  }
+
+  private async exchangeActionStepToken(
+    asConfig: { tokenUrl: string },
+    params: URLSearchParams
+  ) {
+    const response = await fetch(asConfig.tokenUrl, {
+      method: "POST",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        accept: "application/json"
+      },
+      body: params.toString()
+    });
+
+    if (!response.ok) {
+      const body = await response.text();
+      throw new Error(`ActionStep token exchange failed (${response.status}): ${body}`);
+    }
+
+    const payload = (await response.json()) as {
+      access_token: string;
+      refresh_token?: string;
+      expires_in?: number;
+      scope?: string;
+      api_endpoint?: string;
+      token_type?: string;
+    };
+
+    return {
+      accessToken: payload.access_token,
+      refreshToken: payload.refresh_token,
+      expiresAt: payload.expires_in ? new Date(Date.now() + payload.expires_in * 1000) : undefined,
+      scopes: payload.scope?.split(/\s+/).filter(Boolean),
+      apiEndpoint: payload.api_endpoint
     };
   }
 

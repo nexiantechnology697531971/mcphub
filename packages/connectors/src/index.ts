@@ -1,3 +1,4 @@
+export * from "./actionstep/adapter";
 export * from "./cipp/adapter";
 export * from "./base/provider-registry";
 export * from "./halopsa/adapter";

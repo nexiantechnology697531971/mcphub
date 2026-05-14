@@ -20,6 +20,7 @@ const adminNav = [
     section: "Operations",
     items: [
       { href: "/admin/connectors", label: "Connectors", caption: "Provider health" },
+      { href: "/admin/modules", label: "Modules", caption: "Group apps and tools" },
       { href: "/admin/audit", label: "Audit", caption: "Cross-tenant activity" }
     ]
   },

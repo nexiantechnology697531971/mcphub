@@ -7,9 +7,16 @@ import { useEffect, useState } from "react";
 
 import { PageHeader } from "../../../../../components/page-header";
 import { readPlatformSession, type PlatformSession } from "../../../../../lib/platform-auth";
-import { fetchPlatformTenantDetail, type PlatformTenantDetail } from "../../../../../lib/platform-api";
+import {
+  clearTenantModuleOverride,
+  fetchPlatformTenantDetail,
+  fetchTenantModules,
+  setTenantModuleEnabled,
+  type PlatformTenantDetail,
+  type TenantModuleAssignment
+} from "../../../../../lib/platform-api";
 
-const tabs = ["Users", "Connectors", "Audit"] as const;
+const tabs = ["Users", "Modules", "Connectors", "Audit"] as const;
 type Tab = (typeof tabs)[number];
 
 const baselinePolicies = [
@@ -28,6 +35,8 @@ export default function TenantDetailPage() {
   const [activeTab, setActiveTab] = useState<Tab>("Users");
   const [loading, setLoading] = useState(true);
   const [notice, setNotice] = useState("");
+  const [tenantModules, setTenantModules] = useState<TenantModuleAssignment[]>([]);
+  const [savingModuleId, setSavingModuleId] = useState<string>("");
 
   useEffect(() => {
     const storedSession = readPlatformSession();
@@ -49,7 +58,12 @@ export default function TenantDetailPage() {
       setNotice("");
 
       try {
-        setDetail(await fetchPlatformTenantDetail(tenantId, session));
+        const [detailPayload, modulesPayload] = await Promise.all([
+          fetchPlatformTenantDetail(tenantId, session),
+          fetchTenantModules(tenantId, session)
+        ]);
+        setDetail(detailPayload);
+        setTenantModules(modulesPayload.modules);
       } catch (error) {
         setNotice(error instanceof Error ? error.message : "Could not load tenant detail.");
       } finally {
@@ -59,6 +73,34 @@ export default function TenantDetailPage() {
 
     void loadDetail();
   }, [session, tenantId]);
+
+  async function handleToggleModule(moduleId: string, enabled: boolean) {
+    if (!session) return;
+    setSavingModuleId(moduleId);
+    setNotice("");
+    try {
+      const payload = await setTenantModuleEnabled(tenantId, moduleId, enabled, session);
+      setTenantModules(payload.modules);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Could not update module enablement.");
+    } finally {
+      setSavingModuleId("");
+    }
+  }
+
+  async function handleResetModule(moduleId: string) {
+    if (!session) return;
+    setSavingModuleId(moduleId);
+    setNotice("");
+    try {
+      const payload = await clearTenantModuleOverride(tenantId, moduleId, session);
+      setTenantModules(payload.modules);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Could not reset module override.");
+    } finally {
+      setSavingModuleId("");
+    }
+  }
 
   if (loading) {
     return <div className="panel">Loading tenant...</div>;
@@ -108,6 +150,67 @@ export default function TenantDetailPage() {
               ))}
             </tbody>
           </table>
+        </div>
+      ) : null}
+
+      {activeTab === "Modules" ? (
+        <div className="stack">
+          <p className="muted">
+            Enable or disable modules for this tenant. A disabled module hides all its connectors and tools, both in the UI and via MCP.
+          </p>
+          <div className="data-table-wrapper">
+            <table>
+              <thead>
+                <tr>
+                  <th>Module</th>
+                  <th>Connectors</th>
+                  <th>Default</th>
+                  <th>Status for this tenant</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {tenantModules.map((module) => (
+                  <tr key={module.moduleId}>
+                    <td>
+                      <strong>{module.name}</strong>
+                      {module.description ? <p className="muted">{module.description}</p> : null}
+                    </td>
+                    <td>{module.connectors.length === 0 ? <span className="muted">None</span> : module.connectors.join(", ")}</td>
+                    <td>{module.enabledByDefault ? "On" : "Off"}</td>
+                    <td>
+                      <span className={`status-pill ${module.enabled ? "connected" : ""}`}>
+                        {module.enabled ? "Enabled" : "Disabled"}
+                      </span>
+                      {module.isOverride ? <span className="muted"> (override)</span> : null}
+                    </td>
+                    <td>
+                      <div className="row">
+                        <button
+                          type="button"
+                          className="button secondary"
+                          disabled={savingModuleId === module.moduleId}
+                          onClick={() => void handleToggleModule(module.moduleId, !module.enabled)}
+                        >
+                          {module.enabled ? "Disable" : "Enable"}
+                        </button>
+                        {module.isOverride ? (
+                          <button
+                            type="button"
+                            className="button tertiary"
+                            disabled={savingModuleId === module.moduleId}
+                            onClick={() => void handleResetModule(module.moduleId)}
+                          >
+                            Reset to default
+                          </button>
+                        ) : null}
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </div>
       ) : null}
 

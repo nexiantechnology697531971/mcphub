@@ -185,6 +185,111 @@ export async function fetchPlatformConnectors(session?: PlatformSession | null) 
   return authedFetch<{ connectors: PlatformConnector[] }>("/platform/connectors", session);
 }
 
+export type PlatformModule = {
+  id: string;
+  slug: string;
+  name: string;
+  description?: string;
+  enabledByDefault: boolean;
+  connectors: string[];
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type TenantModuleAssignment = {
+  moduleId: string;
+  slug: string;
+  name: string;
+  description?: string;
+  enabled: boolean;
+  enabledByDefault: boolean;
+  isOverride: boolean;
+  connectors: string[];
+};
+
+export async function fetchPlatformModules(session?: PlatformSession | null) {
+  return authedFetch<{ modules: PlatformModule[] }>("/platform/modules", session);
+}
+
+export async function createPlatformModule(
+  body: { name: string; description?: string; enabledByDefault?: boolean; slug?: string },
+  session?: PlatformSession | null
+) {
+  return authedFetch<{ module: PlatformModule }>("/platform/modules", session, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body)
+  });
+}
+
+export async function updatePlatformModule(
+  moduleId: string,
+  body: { name?: string; description?: string | null; enabledByDefault?: boolean },
+  session?: PlatformSession | null
+) {
+  return authedFetch<{ module: PlatformModule }>(`/platform/modules/${moduleId}`, session, {
+    method: "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body)
+  });
+}
+
+export async function deletePlatformModule(moduleId: string, session?: PlatformSession | null) {
+  return authedFetch<{ ok: true }>(`/platform/modules/${moduleId}`, session, {
+    method: "DELETE"
+  });
+}
+
+export async function setModuleConnectors(
+  moduleId: string,
+  providers: string[],
+  session?: PlatformSession | null
+) {
+  return authedFetch<{ module: PlatformModule }>(`/platform/modules/${moduleId}/connectors`, session, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ providers })
+  });
+}
+
+export async function fetchTenantModules(tenantId: string, session?: PlatformSession | null) {
+  return authedFetch<{ modules: TenantModuleAssignment[] }>(
+    `/platform/tenants/${tenantId}/modules`,
+    session
+  );
+}
+
+export async function setTenantModuleEnabled(
+  tenantId: string,
+  moduleId: string,
+  enabled: boolean,
+  session?: PlatformSession | null
+) {
+  return authedFetch<{ modules: TenantModuleAssignment[] }>(
+    `/platform/tenants/${tenantId}/modules/${moduleId}`,
+    session,
+    {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ enabled })
+    }
+  );
+}
+
+export async function clearTenantModuleOverride(
+  tenantId: string,
+  moduleId: string,
+  session?: PlatformSession | null
+) {
+  return authedFetch<{ modules: TenantModuleAssignment[] }>(
+    `/platform/tenants/${tenantId}/modules/${moduleId}`,
+    session,
+    {
+      method: "DELETE"
+    }
+  );
+}
+
 export async function fetchAuditEvents(options?: { tenantId?: string; limit?: number }, session?: PlatformSession | null) {
   const query = new URLSearchParams();
   if (options?.tenantId) {

@@ -1,4 +1,4 @@
-export type ProviderName = "halopsa" | "microsoft365" | "hubspot" | "itglue" | "ninjaone" | "cipp" | "n8n";
+export type ProviderName = "halopsa" | "microsoft365" | "hubspot" | "itglue" | "ninjaone" | "cipp" | "n8n" | "actionstep";
 
 export interface AuthContext {
   tenantId: string;

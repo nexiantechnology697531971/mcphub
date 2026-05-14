@@ -2,7 +2,16 @@ import { notFound } from "next/navigation";
 
 import { WorkspaceConsole } from "../../../../components/workspace-console";
 
-const providers = new Set(["halopsa", "microsoft365", "ninjaone", "cipp", "n8n"]);
+const providers = new Set([
+  "halopsa",
+  "microsoft365",
+  "ninjaone",
+  "cipp",
+  "n8n",
+  "actionstep",
+  "hubspot",
+  "itglue"
+]);
 
 export default async function ConnectorDetailPage(props: {
   params: Promise<{ provider: string }>;

@@ -7,6 +7,7 @@ import { AuditService } from "./modules/audit/audit.service";
 import { AuthService } from "./modules/auth/auth.service";
 import { ConnectorService } from "./modules/connectors/connector.service";
 import { registerApiRoutes } from "./modules/mcp/routes";
+import { ModuleService } from "./modules/modules/module.service";
 import { PlatformService } from "./modules/platform/platform.service";
 
 const config = buildAppConfig();
@@ -28,13 +29,15 @@ app.addContentTypeParser(
 
 const auditService = new AuditService();
 const authService = new AuthService();
-const connectorService = new ConnectorService(auditService);
+const moduleService = new ModuleService(auditService);
+const connectorService = new ConnectorService(auditService, moduleService);
 const platformService = new PlatformService(auditService);
 
 registerApiRoutes(app, {
   authService,
   connectorService,
   auditService,
+  moduleService,
   platformService,
   config
 });

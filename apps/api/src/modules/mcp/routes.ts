@@ -8,6 +8,7 @@ import type { ProviderName } from "@nexian/core/domain/models";
 import type { AuditService } from "../audit/audit.service";
 import type { AuthService, PlatformAuthContext } from "../auth/auth.service";
 import type { ConnectorService } from "../connectors/connector.service";
+import type { ModuleService } from "../modules/module.service";
 import type { PlatformService } from "../platform/platform.service";
 
 const oauthQuerySchema = z.object({
@@ -284,6 +285,7 @@ export function registerApiRoutes(
     authService: AuthService;
     connectorService: ConnectorService;
     auditService: AuditService;
+    moduleService: ModuleService;
     platformService: PlatformService;
     config: {
       apiUrl: string;
@@ -859,6 +861,140 @@ export function registerApiRoutes(
       events: await deps.auditService.listRecent(
         query.success ? { tenantId: query.data.tenantId, limit: query.data.limit } : undefined
       )
+    };
+  });
+
+  app.get("/platform/modules", async (request, reply) => {
+    const auth = parsePlatformAuthFromRequest(request, deps.authService);
+    if (!auth) return reply.status(401).send({ error: "unauthorized" });
+    if (!hasPlatformConsoleAccess(auth)) return reply.status(403).send({ error: "forbidden" });
+    return { modules: await deps.moduleService.listModules() };
+  });
+
+  app.post("/platform/modules", async (request, reply) => {
+    const auth = parsePlatformAuthFromRequest(request, deps.authService);
+    if (!auth) return reply.status(401).send({ error: "unauthorized" });
+    if (!hasPlatformConsoleAccess(auth)) return reply.status(403).send({ error: "forbidden" });
+
+    const body = z
+      .object({
+        name: z.string().min(1),
+        description: z.string().optional(),
+        enabledByDefault: z.boolean().optional(),
+        slug: z.string().optional()
+      })
+      .parse(request.body);
+
+    return {
+      module: await deps.moduleService.createModule({
+        actorTenantId: auth.tenantId,
+        actorUserId: auth.userId,
+        ...body
+      })
+    };
+  });
+
+  app.patch("/platform/modules/:moduleId", async (request, reply) => {
+    const auth = parsePlatformAuthFromRequest(request, deps.authService);
+    if (!auth) return reply.status(401).send({ error: "unauthorized" });
+    if (!hasPlatformConsoleAccess(auth)) return reply.status(403).send({ error: "forbidden" });
+
+    const { moduleId } = z.object({ moduleId: z.string().min(1) }).parse(request.params);
+    const body = z
+      .object({
+        name: z.string().min(1).optional(),
+        description: z.string().nullable().optional(),
+        enabledByDefault: z.boolean().optional()
+      })
+      .parse(request.body);
+
+    return {
+      module: await deps.moduleService.updateModule(moduleId, {
+        actorTenantId: auth.tenantId,
+        actorUserId: auth.userId,
+        ...body
+      })
+    };
+  });
+
+  app.delete("/platform/modules/:moduleId", async (request, reply) => {
+    const auth = parsePlatformAuthFromRequest(request, deps.authService);
+    if (!auth) return reply.status(401).send({ error: "unauthorized" });
+    if (!hasPlatformConsoleAccess(auth)) return reply.status(403).send({ error: "forbidden" });
+
+    const { moduleId } = z.object({ moduleId: z.string().min(1) }).parse(request.params);
+    await deps.moduleService.deleteModule({
+      actorTenantId: auth.tenantId,
+      actorUserId: auth.userId,
+      id: moduleId
+    });
+    return { ok: true };
+  });
+
+  app.put("/platform/modules/:moduleId/connectors", async (request, reply) => {
+    const auth = parsePlatformAuthFromRequest(request, deps.authService);
+    if (!auth) return reply.status(401).send({ error: "unauthorized" });
+    if (!hasPlatformConsoleAccess(auth)) return reply.status(403).send({ error: "forbidden" });
+
+    const { moduleId } = z.object({ moduleId: z.string().min(1) }).parse(request.params);
+    const body = z.object({ providers: z.array(z.string()) }).parse(request.body);
+
+    return {
+      module: await deps.moduleService.setModuleConnectors({
+        actorTenantId: auth.tenantId,
+        actorUserId: auth.userId,
+        moduleId,
+        providers: body.providers
+      })
+    };
+  });
+
+  app.get("/platform/tenants/:tenantId/modules", async (request, reply) => {
+    const auth = parsePlatformAuthFromRequest(request, deps.authService);
+    if (!auth) return reply.status(401).send({ error: "unauthorized" });
+    if (!hasPlatformConsoleAccess(auth)) return reply.status(403).send({ error: "forbidden" });
+
+    const { tenantId } = z.object({ tenantId: z.string().min(1) }).parse(request.params);
+    return { modules: await deps.moduleService.listTenantModuleAssignments(tenantId) };
+  });
+
+  app.put("/platform/tenants/:tenantId/modules/:moduleId", async (request, reply) => {
+    const auth = parsePlatformAuthFromRequest(request, deps.authService);
+    if (!auth) return reply.status(401).send({ error: "unauthorized" });
+    if (!hasPlatformConsoleAccess(auth)) return reply.status(403).send({ error: "forbidden" });
+
+    const { tenantId, moduleId } = z
+      .object({ tenantId: z.string().min(1), moduleId: z.string().min(1) })
+      .parse(request.params);
+    const body = z.object({ enabled: z.boolean() }).parse(request.body);
+
+    return {
+      modules: await deps.moduleService.setTenantModuleEnabled({
+        actorTenantId: auth.tenantId,
+        actorUserId: auth.userId,
+        tenantId,
+        moduleId,
+        enabled: body.enabled
+      })
+    };
+  });
+
+  app.delete("/platform/tenants/:tenantId/modules/:moduleId", async (request, reply) => {
+    const auth = parsePlatformAuthFromRequest(request, deps.authService);
+    if (!auth) return reply.status(401).send({ error: "unauthorized" });
+    if (!hasPlatformConsoleAccess(auth)) return reply.status(403).send({ error: "forbidden" });
+
+    const { tenantId, moduleId } = z
+      .object({ tenantId: z.string().min(1), moduleId: z.string().min(1) })
+      .parse(request.params);
+
+    return {
+      modules: await deps.moduleService.clearTenantModuleOverride({
+        actorTenantId: auth.tenantId,
+        actorUserId: auth.userId,
+        tenantId,
+        moduleId
+      })
     };
   });
 }

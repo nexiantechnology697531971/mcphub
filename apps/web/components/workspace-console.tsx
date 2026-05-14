@@ -27,6 +27,7 @@ type ConnectorConfig = {
   redirectUri: string;
   scopes: string;
   tenantId: string;
+  environment: string;
   hasClientSecret: boolean;
 };
 
@@ -151,6 +152,28 @@ const initialState: DemoState = {
       tools: ["list_workflows", "get_workflow", "list_executions", "get_execution", "trigger_webhook"],
       logoUrl: "https://n8n.io/favicon.ico",
       accent: "n8n"
+    },
+    {
+      id: "actionstep",
+      name: "ActionStep",
+      category: "Legal practice management",
+      auth: "OAuth 2.0",
+      status: "Disconnected",
+      description: "Matters (actions), participants, tasks, and time entries from ActionStep for legal practice workflows.",
+      lastSync: "Not connected",
+      tools: [
+        "list_matters",
+        "search_matters",
+        "get_matter",
+        "list_participants",
+        "search_participants",
+        "get_participant",
+        "list_tasks_for_matter",
+        "list_time_entries"
+      ],
+      realOAuth: true,
+      logoUrl: "https://www.actionstep.com/wp-content/uploads/2021/02/Actionstep_Logo_RGB.png",
+      accent: "actionstep"
     }
   ],
   permissions: [
@@ -222,6 +245,7 @@ export function WorkspaceConsole({
   const [creatingTenant, setCreatingTenant] = useState(false);
   const [connectorConfigs, setConnectorConfigs] = useState<Record<string, ConnectorConfig>>({});
   const [savingConfigId, setSavingConfigId] = useState("");
+  const [visibleProviders, setVisibleProviders] = useState<Set<string> | null>(null);
 
   const origin = typeof window === "undefined" ? "http://localhost:3000" : window.location.origin;
   const apiOrigin = useMemo(
@@ -318,6 +342,7 @@ export function WorkspaceConsole({
         }
 
         const payload = (await response.json()) as { providers: ProviderResponse[] };
+        setVisibleProviders(new Set(payload.providers.map((provider) => provider.provider)));
         setState((current) => ({
           ...current,
           connectors: current.connectors.map((connector) => {
@@ -353,8 +378,11 @@ export function WorkspaceConsole({
 
     async function loadConnectorConfigs() {
       try {
+        const targets = visibleProviders
+          ? initialState.connectors.filter((connector) => visibleProviders.has(connector.id))
+          : initialState.connectors;
         const entries = await Promise.all(
-          initialState.connectors.map(async (connector) => {
+          targets.map(async (connector) => {
             const response = await fetch(`${apiOrigin}/connector-config/${connector.id}`, {
               headers: {
                 authorization: `Bearer ${sessionToken}`
@@ -376,6 +404,7 @@ export function WorkspaceConsole({
                 redirectUri: payload.config.redirectUri ?? "",
                 scopes: payload.config.scopes ?? "",
                 tenantId: payload.config.tenantId ?? "",
+                environment: payload.config.environment ?? "",
                 hasClientSecret: Boolean(payload.config.hasClientSecret)
               }
             ] as const;
@@ -401,9 +430,17 @@ export function WorkspaceConsole({
     }
 
     void loadConnectorConfigs();
-  }, [apiOrigin, session]);
+  }, [apiOrigin, session, visibleProviders]);
 
-  const connectedCount = state.connectors.filter((connector) => connector.status === "Connected").length;
+  const visibleConnectors = useMemo(
+    () =>
+      visibleProviders
+        ? state.connectors.filter((connector) => visibleProviders.has(connector.id))
+        : state.connectors,
+    [state.connectors, visibleProviders]
+  );
+
+  const connectedCount = visibleConnectors.filter((connector) => connector.status === "Connected").length;
 
   function togglePermission(tool: string) {
     setState((current) => ({
@@ -423,24 +460,27 @@ export function WorkspaceConsole({
 
     setSelectedConnector(id);
 
-    if (connector.id === "halopsa" || connector.id === "ninjaone") {
+    if (connector.id === "halopsa" || connector.id === "ninjaone" || connector.id === "actionstep") {
       if (!session) {
         router.replace("/auth/login");
         return;
       }
 
       const configEntry = connectorConfigs[connector.id];
-      const requiresClientSecret = connector.id === "halopsa";
-      if (
-        !configEntry?.apiUrl ||
-        !configEntry?.clientId ||
-        (requiresClientSecret && !configEntry.clientSecret && !configEntry.hasClientSecret)
-      ) {
-        setNotice(
-          requiresClientSecret
-            ? `Save the ${connector.name} API URL, client ID, and client secret in Connector Setup before starting OAuth.`
-            : `Save the ${connector.name} API URL and client ID in Connector Setup before starting OAuth.`
-        );
+      const requiresClientSecret = connector.id === "halopsa" || connector.id === "actionstep";
+      const requiresApiUrl = connector.id !== "actionstep";
+      const missingApiUrl = requiresApiUrl && !configEntry?.apiUrl;
+      const missingSecret =
+        requiresClientSecret && !configEntry?.clientSecret && !configEntry?.hasClientSecret;
+      if (missingApiUrl || !configEntry?.clientId || missingSecret) {
+        const fields = [
+          requiresApiUrl ? "API URL" : null,
+          "client ID",
+          requiresClientSecret ? "client secret" : null
+        ]
+          .filter(Boolean)
+          .join(", ");
+        setNotice(`Save the ${connector.name} ${fields} in Connector Setup before starting OAuth.`);
         return;
       }
 
@@ -608,6 +648,7 @@ export function WorkspaceConsole({
           redirectUri: "",
           scopes: "",
           tenantId: "",
+          environment: "",
           hasClientSecret: false
         },
         ...current[id],
@@ -644,7 +685,8 @@ export function WorkspaceConsole({
           clientSecret: configEntry.clientSecret,
           redirectUri: configEntry.redirectUri,
           scopes: configEntry.scopes,
-          tenantId: configEntry.tenantId
+          tenantId: configEntry.tenantId,
+          environment: configEntry.environment
         })
       });
 
@@ -661,6 +703,7 @@ export function WorkspaceConsole({
         redirectUri: payload.config?.redirectUri ?? configEntry.redirectUri,
         scopes: payload.config?.scopes ?? configEntry.scopes,
         tenantId: payload.config?.tenantId ?? configEntry.tenantId,
+        environment: payload.config?.environment ?? configEntry.environment,
         hasClientSecret: Boolean(payload.config?.hasClientSecret)
       });
 
@@ -690,6 +733,7 @@ export function WorkspaceConsole({
     redirectUri: "",
     scopes: "",
     tenantId: "",
+    environment: "",
     hasClientSecret: false
   };
 
@@ -727,29 +771,45 @@ export function WorkspaceConsole({
                 ? "Live MCP tools: customer lookup, ticketing, action history, project search, contacts, documents, site devices, invoices, and guarded writes."
                 : selected.id === "n8n"
                   ? "n8n is set up for workflow catalog, execution lookups, and webhook-triggered automation runs across linked boxes."
-                  : "Configuration is stored per tenant so each customer can have its own connector settings."}
+                  : selected.id === "actionstep"
+                    ? "ActionStep tools: matters (actions), participants, tasks, and time entries. The regional API endpoint is discovered automatically from the OAuth token response."
+                    : "Configuration is stored per tenant so each customer can have its own connector settings."}
             </p>
             <p className="connector-meta">
               Shared app settings are loaded tenant-wide. Each user still completes their own OAuth consent and gets their own connected account token.
             </p>
           </div>
           <div className="field-grid">
-            <label className="stack">
-              <span className="field-label">API URL</span>
-              <input
-                value={selectedConfig.apiUrl}
-                onChange={(event) => updateConnectorConfig(selected.id, { apiUrl: event.target.value })}
-                placeholder={
-                  selected.id === "halopsa"
-                    ? "https://yourhalo.example.com"
-                    : selected.id === "ninjaone"
-                      ? "https://app.ninjarmm.com"
-                      : selected.id === "n8n"
-                        ? "https://n8n.example.com/api/v1"
-                        : "https://cipp.example.com"
-                }
-              />
-            </label>
+            {selected.id !== "actionstep" ? (
+              <label className="stack">
+                <span className="field-label">API URL</span>
+                <input
+                  value={selectedConfig.apiUrl}
+                  onChange={(event) => updateConnectorConfig(selected.id, { apiUrl: event.target.value })}
+                  placeholder={
+                    selected.id === "halopsa"
+                      ? "https://yourhalo.example.com"
+                      : selected.id === "ninjaone"
+                        ? "https://app.ninjarmm.com"
+                        : selected.id === "n8n"
+                          ? "https://n8n.example.com/api/v1"
+                          : "https://cipp.example.com"
+                  }
+                />
+              </label>
+            ) : null}
+            {selected.id === "actionstep" ? (
+              <label className="stack">
+                <span className="field-label">Environment</span>
+                <select
+                  value={selectedConfig.environment ?? "production"}
+                  onChange={(event) => updateConnectorConfig(selected.id, { environment: event.target.value })}
+                >
+                  <option value="production">Production (go.actionstep.com)</option>
+                  <option value="staging">Staging (go.actionstepstaging.com)</option>
+                </select>
+              </label>
+            ) : null}
             {selected.id === "halopsa" || selected.id === "ninjaone" ? (
               <label className="stack">
                 <span className="field-label">Auth URL</span>
@@ -778,7 +838,7 @@ export function WorkspaceConsole({
                 }
               />
             </label>
-            {selected.id === "halopsa" || selected.id === "ninjaone" || selected.id === "n8n" ? (
+            {selected.id === "halopsa" || selected.id === "ninjaone" || selected.id === "n8n" || selected.id === "actionstep" ? (
               <label className="stack">
                 <span className="field-label">
                   {selected.id === "n8n" ? "Webhook base URL" : "Redirect URI"}
@@ -791,18 +851,24 @@ export function WorkspaceConsole({
                       ? "https://n8n.example.com/webhook"
                       : selected.id === "ninjaone"
                         ? "https://api.example.com/oauth/ninjaone/callback"
-                        : "https://api.example.com/oauth/halopsa/callback"
+                        : selected.id === "actionstep"
+                          ? "https://api.example.com/oauth/actionstep/callback"
+                          : "https://api.example.com/oauth/halopsa/callback"
                   }
                 />
               </label>
             ) : null}
-            {selected.id === "halopsa" || selected.id === "ninjaone" ? (
+            {selected.id === "halopsa" || selected.id === "ninjaone" || selected.id === "actionstep" ? (
               <label className="stack">
                 <span className="field-label">Scopes</span>
                 <input
                   value={selectedConfig.scopes}
                   onChange={(event) => updateConnectorConfig(selected.id, { scopes: event.target.value })}
-                  placeholder="scope-one scope-two"
+                  placeholder={
+                    selected.id === "actionstep"
+                      ? "actions participants tasks timeentries"
+                      : "scope-one scope-two"
+                  }
                 />
               </label>
             ) : null}
@@ -963,7 +1029,7 @@ export function WorkspaceConsole({
             <span className="badge">{connectedCount} live</span>
           </div>
           <div className="connector-grid">
-            {state.connectors.map((connector) => (
+            {visibleConnectors.map((connector) => (
               <div
                 key={connector.id}
                 className={`connector-card connector-card-${connector.accent} ${selectedConnector === connector.id ? "selected" : ""}`}

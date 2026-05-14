@@ -5,6 +5,7 @@ import type { NormalizedToolResponse } from "@nexian/core/mcp/tools";
 export interface ActionStepExecutorDeps {
   encryption: TokenEncryptionService;
   ensureFresh: (account: ConnectedAccountRecord) => Promise<ConnectedAccountRecord>;
+  forceRefresh: (account: ConnectedAccountRecord) => Promise<ConnectedAccountRecord>;
 }
 
 const SOURCE = "actionstep";
@@ -64,7 +65,12 @@ async function fetchWithRefresh(
   let response = await callOnce(account);
 
   if (response.status === 401) {
-    const refreshed = await deps.ensureFresh(account);
+    const refreshed = await deps.forceRefresh(account);
+    if (refreshed.status !== "ACTIVE") {
+      throw new Error(
+        `ActionStep token refresh failed after 401: ${refreshed.lastError ?? "no refresh token available"}`
+      );
+    }
     response = await callOnce(refreshed);
   }
 

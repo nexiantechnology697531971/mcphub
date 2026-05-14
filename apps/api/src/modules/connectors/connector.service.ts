@@ -1682,9 +1682,20 @@ export class ConnectorService {
       throw new Error("Save the Azure Foundry API key in ActionStep settings before chatting.");
     }
 
+    const buildItem = (role: "user" | "assistant" | "system", text: string) => ({
+      type: "message",
+      role,
+      content: [
+        {
+          type: role === "assistant" ? "output_text" : "input_text",
+          text
+        }
+      ]
+    });
+
     const inputItems = [
-      ...history.map((entry) => ({ role: entry.role, content: entry.content })),
-      { role: "user" as const, content: message }
+      ...history.map((entry) => buildItem(entry.role, entry.content)),
+      buildItem("user", message)
     ];
 
     const response = await fetch(responsesUrl, {
@@ -1827,6 +1838,20 @@ export class ConnectorService {
       return refreshed;
     }
 
+    if (account.provider === "actionstep") {
+      const refreshed = await this.refreshActionStepAccountIfNeeded(account);
+      if (
+        refreshed.accessTokenEncrypted !== account.accessTokenEncrypted ||
+        refreshed.refreshTokenEncrypted !== account.refreshTokenEncrypted ||
+        refreshed.expiresAt?.toISOString() !== account.expiresAt?.toISOString() ||
+        refreshed.status !== account.status
+      ) {
+        refreshed.updatedAt = new Date();
+        await this.store.upsert(refreshed);
+      }
+      return refreshed;
+    }
+
     const adapter = this.registry.get(account.provider);
     if (!adapter) {
       throw new Error(`Unknown provider ${account.provider}`);
@@ -1885,7 +1910,8 @@ export class ConnectorService {
       return executeActionStepTool(
         {
           encryption: this.encryption,
-          ensureFresh: (acc) => this.ensureFreshAccount(acc)
+          ensureFresh: (acc) => this.ensureFreshAccount(acc),
+          forceRefresh: (acc) => this.forceRefreshActionStepAccountWithPersist(acc)
         },
         fresh,
         toolName,
@@ -5009,5 +5035,62 @@ export class ConnectorService {
         lastError: error instanceof Error ? error.message : "Unknown refresh error"
       };
     }
+  }
+
+  private async refreshActionStepAccountIfNeeded(account: ConnectedAccountRecord): Promise<ConnectedAccountRecord> {
+    if (!account.expiresAt || account.expiresAt.getTime() > Date.now() + 60_000) {
+      return account;
+    }
+
+    return this.forceRefreshActionStepAccount(account);
+  }
+
+  private async forceRefreshActionStepAccount(account: ConnectedAccountRecord): Promise<ConnectedAccountRecord> {
+    if (!account.refreshTokenEncrypted) {
+      return account;
+    }
+
+    try {
+      const asConfig = await this.resolveActionStepConfig(account.tenantId);
+      const refreshToken = this.encryption.decrypt(account.refreshTokenEncrypted);
+      const tokens = await this.exchangeActionStepToken(
+        asConfig,
+        new URLSearchParams({
+          grant_type: "refresh_token",
+          client_id: asConfig.clientId,
+          client_secret: asConfig.clientSecret,
+          refresh_token: refreshToken
+        })
+      );
+
+      return {
+        ...account,
+        accessTokenEncrypted: this.encryption.encrypt(tokens.accessToken),
+        refreshTokenEncrypted: tokens.refreshToken ? this.encryption.encrypt(tokens.refreshToken) : account.refreshTokenEncrypted,
+        expiresAt: tokens.expiresAt ?? account.expiresAt,
+        status: "ACTIVE",
+        lastError: undefined
+      };
+    } catch (error) {
+      return {
+        ...account,
+        status: "ERROR",
+        lastError: error instanceof Error ? error.message : "Unknown refresh error"
+      };
+    }
+  }
+
+  private async forceRefreshActionStepAccountWithPersist(account: ConnectedAccountRecord): Promise<ConnectedAccountRecord> {
+    const refreshed = await this.forceRefreshActionStepAccount(account);
+    if (
+      refreshed.accessTokenEncrypted !== account.accessTokenEncrypted ||
+      refreshed.refreshTokenEncrypted !== account.refreshTokenEncrypted ||
+      refreshed.expiresAt?.toISOString() !== account.expiresAt?.toISOString() ||
+      refreshed.status !== account.status
+    ) {
+      refreshed.updatedAt = new Date();
+      await this.store.upsert(refreshed);
+    }
+    return refreshed;
   }
 }

@@ -34,24 +34,13 @@ const adminNav = [
 
 const tenantNav = [
   {
-    section: "Workspace",
+    section: "",
     items: [
       { href: "/dashboard", label: "Overview", caption: "Workspace health" },
-      { href: "/dashboard/connectors", label: "Connectors", caption: "Linked products" }
-    ]
-  },
-  {
-    section: "Automation",
-    items: [
-      { href: "/dashboard/workflows", label: "n8n Workflows", caption: "Workflow and execution API" },
-      { href: "/dashboard/mcp", label: "MCP Access", caption: "Endpoint and tokens" }
-    ]
-  },
-  {
-    section: "Governance",
-    items: [
-      { href: "/dashboard/permissions", label: "Permissions", caption: "Tool guardrails" },
-      { href: "/dashboard/audit", label: "Audit", caption: "Operational trail" }
+      { href: "/dashboard/connectors", label: "Connectors", caption: "Linked products" },
+      { href: "/dashboard/chat", label: "Chat", caption: "Talk to the Nexian agent" },
+      { href: "/dashboard/workflows", label: "Automation", caption: "Workflows and executions" },
+      { href: "/dashboard/settings", label: "Settings", caption: "Permissions, audit, MCP, agent" }
     ]
   }
 ] as const;
@@ -83,25 +72,15 @@ export function Sidebar({ variant }: { variant: "admin" | "tenant" }) {
             <NexianLogo className="sidebar-logo-image" priority="high" />
           </span>
           <span className="sidebar-brand-copy">
-            <strong>Nexian Command</strong>
+            <strong>Nexian Command Platform</strong>
             <span>{variant === "admin" ? "MSP Operations Console" : "Customer Workspace"}</span>
           </span>
         </Link>
 
-        <div className="sidebar-panel">
-          <span className="sidebar-kicker">Mode</span>
-          <strong>{variant === "admin" ? "Platform" : "Tenant"}</strong>
-          <p>
-            {variant === "admin"
-              ? "Operate customer estates, product packaging, and cross-tenant governance."
-              : "Manage customer integrations, permissions, and governed AI access."}
-          </p>
-        </div>
-
         <nav className="sidebar-nav">
           {navGroups.map((group) => (
-            <div key={group.section} className="sidebar-group">
-              <span className="sidebar-group-title">{group.section}</span>
+            <div key={group.section || "primary"} className="sidebar-group">
+              {group.section ? <span className="sidebar-group-title">{group.section}</span> : null}
               {group.items.map((item) => {
                 const active = pathname === item.href || pathname.startsWith(`${item.href}/`);
                 return (

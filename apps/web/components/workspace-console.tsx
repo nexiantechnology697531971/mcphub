@@ -37,12 +37,6 @@ type ConnectorConfig = {
   hasAzureAgentApiKey?: boolean;
 };
 
-type ChatMessage = {
-  id: string;
-  role: "user" | "assistant" | "system";
-  content: string;
-};
-
 type Permission = {
   tool: string;
   roles: string[];
@@ -261,10 +255,7 @@ export function WorkspaceConsole({
   const [connectorConfigs, setConnectorConfigs] = useState<Record<string, ConnectorConfig>>({});
   const [savingConfigId, setSavingConfigId] = useState("");
   const [visibleProviders, setVisibleProviders] = useState<Set<string> | null>(null);
-  const [actionstepTab, setActionstepTab] = useState<"overview" | "chat" | "settings">("overview");
-  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
-  const [chatInput, setChatInput] = useState("");
-  const [chatSending, setChatSending] = useState(false);
+  const [actionstepTab, setActionstepTab] = useState<"overview" | "settings">("overview");
 
   const origin = typeof window === "undefined" ? "http://localhost:3000" : window.location.origin;
   const apiOrigin = useMemo(
@@ -778,67 +769,6 @@ export function WorkspaceConsole({
     }
   }
 
-  async function sendChatMessage() {
-    const trimmed = chatInput.trim();
-    if (!trimmed || chatSending) {
-      return;
-    }
-    if (!session) {
-      router.replace("/auth/login");
-      return;
-    }
-
-    const userMessage: ChatMessage = {
-      id: `${Date.now()}-u-${Math.random().toString(36).slice(2, 6)}`,
-      role: "user",
-      content: trimmed
-    };
-
-    setChatMessages((current) => [...current, userMessage]);
-    setChatInput("");
-    setChatSending(true);
-
-    try {
-      const response = await fetch(`${apiOrigin}/connectors/actionstep/chat`, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          authorization: `Bearer ${session.token}`
-        },
-        body: JSON.stringify({
-          message: trimmed,
-          history: chatMessages.map(({ role, content }) => ({ role, content }))
-        })
-      });
-
-      const payload = (await response.json()) as { reply?: string; error?: string; message?: string };
-      if (!response.ok) {
-        throw new Error(payload.message ?? payload.error ?? "Chat request failed.");
-      }
-
-      const reply = payload.reply?.trim();
-      setChatMessages((current) => [
-        ...current,
-        {
-          id: `${Date.now()}-a-${Math.random().toString(36).slice(2, 6)}`,
-          role: "assistant",
-          content: reply && reply.length > 0 ? reply : "(no response)"
-        }
-      ]);
-    } catch (error) {
-      setChatMessages((current) => [
-        ...current,
-        {
-          id: `${Date.now()}-s-${Math.random().toString(36).slice(2, 6)}`,
-          role: "system",
-          content: error instanceof Error ? error.message : "Could not reach the ActionStep agent."
-        }
-      ]);
-    } finally {
-      setChatSending(false);
-    }
-  }
-
   const selected = state.connectors.find((connector) => connector.id === selectedConnector) ?? state.connectors[0];
   const canManageTenants = hasPlatformConsoleAccess(session);
   const selectedConfig = connectorConfigs[selected.id] ?? {
@@ -903,13 +833,6 @@ export function WorkspaceConsole({
               Overview
             </button>
             <button
-              className={`tab ${actionstepTab === "chat" ? "active" : ""}`}
-              onClick={() => setActionstepTab("chat")}
-              type="button"
-            >
-              Chat
-            </button>
-            <button
               className={`tab ${actionstepTab === "settings" ? "active" : ""}`}
               onClick={() => setActionstepTab("settings")}
               type="button"
@@ -936,47 +859,6 @@ export function WorkspaceConsole({
               </div>
               <p className="connector-meta">Last activity: {selected.lastSync}</p>
               {selected.lastError ? <p className="danger-text">{selected.lastError}</p> : null}
-            </div>
-          ) : null}
-
-          {actionstepTab === "chat" ? (
-            <div className="chat-shell">
-              <div className="chat-log">
-                {chatMessages.length === 0 ? (
-                  <div className="chat-empty">
-                    Ask the ActionStep assistant about a matter, participant, or open task.
-                  </div>
-                ) : (
-                  chatMessages.map((message) => (
-                    <div key={message.id} className={`chat-message ${message.role}`}>
-                      {message.content}
-                    </div>
-                  ))
-                )}
-                {chatSending ? <div className="chat-message system">Thinking…</div> : null}
-              </div>
-              <div className="chat-composer">
-                <textarea
-                  value={chatInput}
-                  onChange={(event) => setChatInput(event.target.value)}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter" && !event.shiftKey) {
-                      event.preventDefault();
-                      void sendChatMessage();
-                    }
-                  }}
-                  placeholder="Ask about a matter, task, or participant…"
-                  disabled={chatSending}
-                />
-                <button
-                  className="button primary"
-                  onClick={() => void sendChatMessage()}
-                  type="button"
-                  disabled={chatSending || !chatInput.trim()}
-                >
-                  {chatSending ? "Sending…" : "Send"}
-                </button>
-              </div>
             </div>
           ) : null}
 
@@ -1035,61 +917,6 @@ export function WorkspaceConsole({
                   />
                   <span className="connector-meta">
                     {selectedConfig.hasClientSecret ? "A secret is already saved." : "No secret saved yet."}
-                  </span>
-                </label>
-              </div>
-
-              <div className="settings-section stack">
-                <div className="settings-section-header">Azure Foundry agent</div>
-                <p className="muted">Powers the Chat tab. Get these values from the Agent application details page in Azure AI Foundry.</p>
-                <div className="field-grid">
-                  <label className="stack">
-                    <span className="field-label">Responses endpoint</span>
-                    <input
-                      value={selectedConfig.azureAgentResponsesUrl ?? ""}
-                      onChange={(event) => updateConnectorConfig(selected.id, { azureAgentResponsesUrl: event.target.value })}
-                      placeholder="https://…/protocols/openai/responses?api-version=…"
-                    />
-                  </label>
-                  <label className="stack">
-                    <span className="field-label">Activity protocol endpoint</span>
-                    <input
-                      value={selectedConfig.azureAgentActivityUrl ?? ""}
-                      onChange={(event) => updateConnectorConfig(selected.id, { azureAgentActivityUrl: event.target.value })}
-                      placeholder="https://…/protocols/activityprotocol?api-version=…"
-                    />
-                  </label>
-                  <label className="stack">
-                    <span className="field-label">Principal ID</span>
-                    <input
-                      value={selectedConfig.azureAgentPrincipalId ?? ""}
-                      onChange={(event) => updateConnectorConfig(selected.id, { azureAgentPrincipalId: event.target.value })}
-                      placeholder="Agent principal (object) ID"
-                    />
-                  </label>
-                  <label className="stack">
-                    <span className="field-label">Azure tenant ID</span>
-                    <input
-                      value={selectedConfig.azureAgentTenantId ?? ""}
-                      onChange={(event) => updateConnectorConfig(selected.id, { azureAgentTenantId: event.target.value })}
-                      placeholder="Entra tenant ID"
-                    />
-                  </label>
-                </div>
-                <label className="stack">
-                  <span className="field-label">API key or access token</span>
-                  <input
-                    type="password"
-                    value={selectedConfig.azureAgentApiKey ?? ""}
-                    onChange={(event) => updateConnectorConfig(selected.id, { azureAgentApiKey: event.target.value })}
-                    placeholder={
-                      selectedConfig.hasAzureAgentApiKey
-                        ? "Saved already. Enter a new key to replace it."
-                        : "API key or bearer token for the Responses endpoint"
-                    }
-                  />
-                  <span className="connector-meta">
-                    {selectedConfig.hasAzureAgentApiKey ? "A key is already saved." : "No key saved yet."}
                   </span>
                 </label>
               </div>
@@ -1305,14 +1132,8 @@ export function WorkspaceConsole({
     <div className="console stack">
       <section className="hero hero-console">
         <div className="hero-copy stack">
-          <span className="eyebrow">Nexian AI & Automation Control Centre</span>
+          <span className="eyebrow">{state.workspaceName}</span>
           <h1 className="hero-title">Connect your MSP stack, control safe tools, and hand clients a single MCP endpoint.</h1>
-          <p className="muted hero-text">
-            HaloPSA now uses the real authorization-code route and exposes the expanded Nexian MCP surface for tickets,
-            actions, projects, contacts, knowledge, assets, invoices, and guarded writes. The other connectors remain
-            scaffolded until we wire their provider-specific token exchange and storage paths. n8n is included for
-            workflow boxes, execution history, and webhook-triggered automation runs.
-          </p>
           <div className="stats-grid">
             <div className="stat-card">
               <strong>{connectedCount}</strong>
@@ -1329,66 +1150,49 @@ export function WorkspaceConsole({
           </div>
           {notice ? <div className="notice">{notice}</div> : null}
         </div>
-        <aside className="hero-side stack">
-          <div className="panel panel-dark stack">
-            <span className="eyebrow">Workspace</span>
-            <strong className="workspace-name">{state.workspaceName}</strong>
-            <label className="stack">
-              <span className="field-label">Tenant slug</span>
-              <input value={state.workspaceSlug} readOnly />
-            </label>
-            <label className="stack">
-              <span className="field-label">Tenant ID</span>
-              <input value={state.tenantId} readOnly />
-            </label>
-            <label className="stack">
-              <span className="field-label">User ID</span>
-              <input value={state.userId} readOnly />
-            </label>
-            <div className="stack">
-              <span className="field-label">Active tenants</span>
-              <div className="chip-row">
-                {(session?.tenants ?? []).map((tenant) => (
-                  <button
-                    key={tenant.id}
-                    className={`chip tenant-chip ${tenant.id === state.tenantId ? "active" : ""}`}
-                    onClick={() => void switchTenant(tenant.id)}
-                    type="button"
-                    disabled={switchingTenant}
-                  >
-                    {tenant.name} · {tenant.role}
-                  </button>
-                ))}
-              </div>
-            </div>
-            {canManageTenants ? (
-              <>
-                <label className="stack">
-                  <span className="field-label">Create tenant</span>
-                  <input
-                    value={newTenantName}
-                    onChange={(event) => setNewTenantName(event.target.value)}
-                    placeholder="Add a new customer workspace"
-                  />
-                </label>
-                <div className="row">
-                  <button className="button primary" onClick={() => void createTenant()} type="button" disabled={creatingTenant}>
-                    {creatingTenant ? "Creating..." : "Create tenant"}
-                  </button>
-                  <button className="button secondary" onClick={signOut} type="button">
-                    Sign out
-                  </button>
+        {(session?.tenants?.length ?? 0) > 1 || canManageTenants ? (
+          <aside className="hero-side stack">
+            <div className="panel panel-dark stack">
+              <span className="eyebrow">Workspace</span>
+              <strong className="workspace-name">{state.workspaceName}</strong>
+              {(session?.tenants?.length ?? 0) > 1 ? (
+                <div className="stack">
+                  <span className="field-label">Switch tenant</span>
+                  <div className="chip-row">
+                    {(session?.tenants ?? []).map((tenant) => (
+                      <button
+                        key={tenant.id}
+                        className={`chip tenant-chip ${tenant.id === state.tenantId ? "active" : ""}`}
+                        onClick={() => void switchTenant(tenant.id)}
+                        type="button"
+                        disabled={switchingTenant}
+                      >
+                        {tenant.name}
+                      </button>
+                    ))}
+                  </div>
                 </div>
-              </>
-            ) : (
-              <div className="row">
-                <button className="button secondary" onClick={signOut} type="button">
-                  Sign out
-                </button>
-              </div>
-            )}
-          </div>
-        </aside>
+              ) : null}
+              {canManageTenants ? (
+                <>
+                  <label className="stack">
+                    <span className="field-label">Create tenant</span>
+                    <input
+                      value={newTenantName}
+                      onChange={(event) => setNewTenantName(event.target.value)}
+                      placeholder="Add a new customer workspace"
+                    />
+                  </label>
+                  <div className="row">
+                    <button className="button primary" onClick={() => void createTenant()} type="button" disabled={creatingTenant}>
+                      {creatingTenant ? "Creating..." : "Create tenant"}
+                    </button>
+                  </div>
+                </>
+              ) : null}
+            </div>
+          </aside>
+        ) : null}
       </section>
 
       <section className="dashboard-grid">

@@ -2457,10 +2457,15 @@ export class ConnectorService {
       ? ` matching category filter`
       : "";
 
+    const completenessNote =
+      normalizedStatuses.length >= limit
+        ? ` Returned the maximum ${limit} tickets for this query — if the user needs even more, narrow the query (e.g. tighter date range or specific category) rather than calling this tool again with different page parameters.`
+        : " This is the complete result set for this query — do not call list_open_tickets again to paginate; pagination is handled server-side.";
+
     return {
       summary:
         normalizedStatuses.length > 0
-          ? `Found ${normalizedStatuses.length} ${statusLabel}HaloPSA tickets${resolvedCustomerName ? ` for ${resolvedCustomerName}` : ""}${resolvedUserName ? `${resolvedCustomerName ? " and " : " for "}${resolvedUserName}` : ""}${dateLabel}${categoryLabel}. Results are condensed to ticket id, summary, status, customer, priority, category path, and latest update.`
+          ? `Found ${normalizedStatuses.length} ${statusLabel}HaloPSA tickets${resolvedCustomerName ? ` for ${resolvedCustomerName}` : ""}${resolvedUserName ? `${resolvedCustomerName ? " and " : " for "}${resolvedUserName}` : ""}${dateLabel}${categoryLabel}. Results are condensed to ticket id, summary, status, customer, priority, category path, and latest update.${completenessNote}`
           : `No ${statusLabel}HaloPSA tickets found${resolvedCustomerName ? ` for ${resolvedCustomerName}` : ""}${resolvedUserName ? `${resolvedCustomerName ? " and " : " for "}${resolvedUserName}` : ""}${dateLabel}${categoryLabel}.`,
       data: normalizedStatuses.map(({ ticket, status }) => buildNormalizedHaloTicket(ticket, status)),
       source: "halopsa"

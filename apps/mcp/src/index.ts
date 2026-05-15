@@ -107,17 +107,38 @@ async function getDisabledToolsForTenant(tenantId: string): Promise<Set<string>>
   }
 }
 
+const MAX_TOOL_TEXT_BYTES = 200_000;
+
 function buildToolCallResult(output: NormalizedToolResponse) {
-  const preview =
-    output.data.length > 0
-      ? `\n\n${JSON.stringify(output.data.slice(0, 3), null, 2)}`
-      : "";
+  let body = "";
+  if (output.data.length > 0) {
+    const full = JSON.stringify(output.data, null, 2);
+    if (full.length <= MAX_TOOL_TEXT_BYTES) {
+      body = `\n\n${full}`;
+    } else {
+      // Result set too large to inline in full — emit as many records as fit
+      // and tell the model the rest are available via structuredContent so it
+      // does NOT make a second tool call to "paginate".
+      const records: string[] = [];
+      let used = 0;
+      let included = 0;
+      for (const record of output.data) {
+        const serialized = JSON.stringify(record, null, 2);
+        if (used + serialized.length + 2 > MAX_TOOL_TEXT_BYTES) break;
+        records.push(serialized);
+        used += serialized.length + 2;
+        included += 1;
+      }
+      const remaining = output.data.length - included;
+      body = `\n\n[${included} of ${output.data.length} records shown inline; the remaining ${remaining} are in structuredContent.data — DO NOT call this tool again to fetch them]\n\n[${records.join(",\n")}]`;
+    }
+  }
 
   return {
     content: [
       {
         type: "text",
-        text: `${output.summary}${preview}`
+        text: `${output.summary}${body}`
       }
     ],
     structuredContent: output,

@@ -270,6 +270,74 @@ const timeEntriesFiltersSchema = z.object({
   include_full: z.boolean().describe(includeFullDescription).optional()
 });
 
+const dormantMattersSchema = z.object({
+  days: z
+    .number()
+    .int()
+    .positive()
+    .max(365)
+    .describe("Lookback window in days. A matter is dormant if it has zero time entries in the last N days. Defaults to 14.")
+    .optional(),
+  status: z
+    .string()
+    .describe("Matter status to scan. Defaults to 'active' — pass 'closed' or another status to widen.")
+    .optional(),
+  assigned_to_participant_id: z
+    .number()
+    .int()
+    .positive()
+    .describe("Restrict the scan to matters assigned to this participant (fee earner). Optional.")
+    .optional(),
+  include_full: z.boolean().describe(includeFullDescription).optional()
+});
+
+const quietMattersSchema = z.object({
+  days: z
+    .number()
+    .int()
+    .positive()
+    .max(365)
+    .describe("Lookback window in days. Defaults to 14.")
+    .optional(),
+  status: z
+    .string()
+    .describe("Matter status to scan. Defaults to 'active'.")
+    .optional(),
+  assigned_to_participant_id: z
+    .number()
+    .int()
+    .positive()
+    .describe("Restrict the scan to matters assigned to this participant. Optional.")
+    .optional(),
+  signals: z
+    .array(z.enum(["time", "file_notes", "emails"]))
+    .min(1)
+    .describe("Activity signals that count as 'a sign of life'. A matter is quiet only if ALL chosen signals are absent in the window. Defaults to all three.")
+    .optional(),
+  include_full: z.boolean().describe(includeFullDescription).optional()
+});
+
+const matterActivitySummarySchema = z.object({
+  days: z
+    .number()
+    .int()
+    .positive()
+    .max(365)
+    .describe("Lookback window in days for activity counts and last-touched timestamps. Defaults to 14.")
+    .optional(),
+  status: z
+    .string()
+    .describe("Matter status to scan. Defaults to 'active'.")
+    .optional(),
+  assigned_to_participant_id: z
+    .number()
+    .int()
+    .positive()
+    .describe("Restrict to matters assigned to this participant. Strongly recommended unless you want every active matter in the firm.")
+    .optional(),
+  include_full: z.boolean().describe(includeFullDescription).optional()
+});
+
 function scaffold<TInput>(
   name: string,
   description: string,
@@ -392,6 +460,21 @@ export const actionStepAdapter: ProviderAdapter = {
         "list_matter_emails",
         "List ActionStep emails recorded against a matter. Use when the user asks about correspondence, email history, sent/received emails, or 'who's been emailing on this file'. `matter_id` is REQUIRED — emails must be scoped to a specific matter; call search_matters first if you only have a name. Also supports optional participant_id and date_from/date_to filters. Returns each email's subject, from/to, sent timestamp and body summary.",
         emailsFiltersSchema
+      ),
+      scaffold(
+        "list_dormant_matters",
+        "Find ActionStep matters with NO TIME RECORDED in the last N days. Use when the user asks about dormant matters, files with no recent time, 'which matters haven't been worked on', 'matters with zero time this fortnight', or wants to chase fee earners about untracked work. Defaults: 14 days, status='active'. Optionally narrow to a single fee earner via assigned_to_participant_id. Returns each dormant matter with its slim record plus activity counters in the window.",
+        dormantMattersSchema
+      ),
+      scaffold(
+        "list_quiet_matters",
+        "Find ActionStep matters with no sign of life across selected signals (time / file_notes / emails) in the last N days. Broader than `list_dormant_matters` — catches matters where no time was recorded AND no notes were entered AND no emails came in. Use when the user asks about truly dormant files, closure candidates, or matters that have 'gone quiet'. Defaults: 14 days, status='active', signals=all three. Use `signals` to scope (e.g. `[\"time\",\"file_notes\"]` ignores email activity).",
+        quietMattersSchema
+      ),
+      scaffold(
+        "get_matter_activity_summary",
+        "List matters with per-matter activity counters and last-touched timestamps across time entries, file notes and emails for the last N days. Use when the user wants a portfolio view ('show me my book sorted by activity', 'which of my matters has the most going on', 'when did I last touch each file'). Strongly prefer passing `assigned_to_participant_id` to scope to a fee earner — otherwise this scans every active matter in the firm.",
+        matterActivitySummarySchema
       )
     ];
   }

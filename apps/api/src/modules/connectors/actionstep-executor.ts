@@ -795,6 +795,361 @@ async function listEmails(
   };
 }
 
+function extractLinkedId(record: Record<string, unknown>, key: string): string | undefined {
+  const links = record.links;
+  if (!links || typeof links !== "object" || Array.isArray(links)) return undefined;
+  const value = (links as Record<string, unknown>)[key];
+  if (typeof value === "string" && value.trim().length > 0) return value.trim();
+  if (typeof value === "number") return String(value);
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    const id = (value as Record<string, unknown>).id;
+    if (typeof id === "string" && id.trim().length > 0) return id.trim();
+    if (typeof id === "number") return String(id);
+  }
+  return undefined;
+}
+
+function pickTimestamp(record: Record<string, unknown>, keys: readonly string[]): string | undefined {
+  for (const key of keys) {
+    const value = record[key];
+    if (typeof value === "string" && value.trim().length > 0) return value;
+  }
+  return undefined;
+}
+
+const TIME_DATE_FIELDS = ["date", "modifiedTimestamp", "createdTimestamp"] as const;
+const FILENOTE_DATE_FIELDS = ["enteredTimestamp", "noteTimestamp", "createdTimestamp"] as const;
+const EMAIL_DATE_FIELDS = ["sentTimestamp", "receivedTimestamp", "createdTimestamp"] as const;
+
+type ActivitySignal = "time" | "file_notes" | "emails";
+
+type MatterActivity = {
+  lastTimeEntry?: string;
+  lastFileNote?: string;
+  lastEmail?: string;
+  timeEntryCount: number;
+  fileNoteCount: number;
+  emailCount: number;
+};
+
+type ActivityFetchOutcome = {
+  records: Record<string, unknown>[];
+  paging: PagingMeta;
+  pagesFetched: number;
+};
+
+type ActivityIndex = {
+  matters: Record<string, unknown>[];
+  activityByMatterId: Map<string, MatterActivity>;
+  windowStart: string;
+  signalsFetched: ReadonlyArray<ActivitySignal>;
+  matterFetch: ActivityFetchOutcome;
+  timeFetch: ActivityFetchOutcome;
+  noteFetch: ActivityFetchOutcome;
+  emailFetch: ActivityFetchOutcome;
+};
+
+function emptyFetchOutcome(): ActivityFetchOutcome {
+  return { records: [], paging: {}, pagesFetched: 0 };
+}
+
+function isTruncated(outcome: ActivityFetchOutcome): boolean {
+  const total = outcome.paging.recordCount;
+  if (typeof total !== "number") return false;
+  return outcome.records.length < total;
+}
+
+function buildTruncationNote(index: ActivityIndex): string {
+  const warnings: string[] = [];
+  if (isTruncated(index.matterFetch)) {
+    warnings.push(
+      `matter list truncated (${index.matterFetch.records.length} of ${index.matterFetch.paging.recordCount})`
+    );
+  }
+  if (index.signalsFetched.includes("time") && isTruncated(index.timeFetch)) {
+    warnings.push(
+      `time entries truncated (${index.timeFetch.records.length} of ${index.timeFetch.paging.recordCount}) — some matters may be falsely flagged as inactive`
+    );
+  }
+  if (index.signalsFetched.includes("file_notes") && isTruncated(index.noteFetch)) {
+    warnings.push(
+      `file notes truncated (${index.noteFetch.records.length} of ${index.noteFetch.paging.recordCount})`
+    );
+  }
+  if (index.signalsFetched.includes("emails") && isTruncated(index.emailFetch)) {
+    warnings.push(
+      `emails truncated (${index.emailFetch.records.length} of ${index.emailFetch.paging.recordCount})`
+    );
+  }
+  return warnings.length > 0 ? ` WARNING: ${warnings.join("; ")}.` : "";
+}
+
+function maxTimestamp(values: ReadonlyArray<string | undefined>): string | undefined {
+  let best: string | undefined;
+  for (const value of values) {
+    if (!value) continue;
+    if (!best || value > best) best = value;
+  }
+  return best;
+}
+
+function daysBetween(fromIso: string | undefined, nowMs: number): number | undefined {
+  if (!fromIso) return undefined;
+  const ts = Date.parse(fromIso);
+  if (!Number.isFinite(ts)) return undefined;
+  const diffMs = nowMs - ts;
+  if (diffMs < 0) return 0;
+  return Math.floor(diffMs / (24 * 60 * 60 * 1000));
+}
+
+async function buildMatterActivityIndex(
+  deps: ActionStepExecutorDeps,
+  account: ConnectedAccountRecord,
+  options: {
+    days: number;
+    status: string;
+    assignedTo?: number;
+    signals: ReadonlyArray<ActivitySignal>;
+  }
+): Promise<ActivityIndex> {
+  const endpoint = getApiEndpoint(account);
+  const windowStart = new Date(Date.now() - options.days * 24 * 60 * 60 * 1000)
+    .toISOString()
+    .slice(0, 10);
+
+  const matterQuery = {
+    status: options.status,
+    assignedTo: options.assignedTo
+  };
+
+  const wantTime = options.signals.includes("time");
+  const wantNotes = options.signals.includes("file_notes");
+  const wantEmails = options.signals.includes("emails");
+
+  const [matterFetch, timeFetch, noteFetch, emailFetch] = await Promise.all([
+    fetchAllPages(deps, account, endpoint, "/api/rest/actions", matterQuery, "actions"),
+    wantTime
+      ? fetchAllPages(deps, account, endpoint, "/api/rest/timerecords", { dateFrom: windowStart }, "timerecords")
+      : Promise.resolve(emptyFetchOutcome()),
+    wantNotes
+      ? fetchAllPages(deps, account, endpoint, "/api/rest/filenotes", { dateFrom: windowStart }, "filenotes")
+      : Promise.resolve(emptyFetchOutcome()),
+    wantEmails
+      ? fetchAllPages(deps, account, endpoint, "/api/rest/emails", { dateFrom: windowStart }, "emails")
+      : Promise.resolve(emptyFetchOutcome())
+  ]);
+
+  const activityByMatterId = new Map<string, MatterActivity>();
+  const ensure = (id: string): MatterActivity => {
+    let entry = activityByMatterId.get(id);
+    if (!entry) {
+      entry = { timeEntryCount: 0, fileNoteCount: 0, emailCount: 0 };
+      activityByMatterId.set(id, entry);
+    }
+    return entry;
+  };
+
+  for (const record of timeFetch.records) {
+    const matterId = extractLinkedId(record, "action");
+    if (!matterId) continue;
+    const entry = ensure(matterId);
+    entry.timeEntryCount += 1;
+    const ts = pickTimestamp(record, TIME_DATE_FIELDS);
+    if (ts && (!entry.lastTimeEntry || ts > entry.lastTimeEntry)) entry.lastTimeEntry = ts;
+  }
+
+  for (const record of noteFetch.records) {
+    const matterId = extractLinkedId(record, "action");
+    if (!matterId) continue;
+    const entry = ensure(matterId);
+    entry.fileNoteCount += 1;
+    const ts = pickTimestamp(record, FILENOTE_DATE_FIELDS);
+    if (ts && (!entry.lastFileNote || ts > entry.lastFileNote)) entry.lastFileNote = ts;
+  }
+
+  for (const record of emailFetch.records) {
+    const matterId = extractLinkedId(record, "action");
+    if (!matterId) continue;
+    const entry = ensure(matterId);
+    entry.emailCount += 1;
+    const ts = pickTimestamp(record, EMAIL_DATE_FIELDS);
+    if (ts && (!entry.lastEmail || ts > entry.lastEmail)) entry.lastEmail = ts;
+  }
+
+  return {
+    matters: matterFetch.records,
+    activityByMatterId,
+    windowStart,
+    signalsFetched: options.signals,
+    matterFetch,
+    timeFetch,
+    noteFetch,
+    emailFetch
+  };
+}
+
+function decorateMatterWithActivity(
+  matter: Record<string, unknown>,
+  activity: MatterActivity | undefined,
+  signals: ReadonlyArray<ActivitySignal>,
+  nowMs: number,
+  full: boolean
+): Record<string, unknown> {
+  const base = full ? matter : slimMatter(matter);
+  const lastAny = maxTimestamp([activity?.lastTimeEntry, activity?.lastFileNote, activity?.lastEmail]);
+  return {
+    ...base,
+    activityInWindow: {
+      signals,
+      timeEntryCount: activity?.timeEntryCount ?? 0,
+      fileNoteCount: activity?.fileNoteCount ?? 0,
+      emailCount: activity?.emailCount ?? 0,
+      lastTimeEntry: activity?.lastTimeEntry,
+      lastFileNote: activity?.lastFileNote,
+      lastEmail: activity?.lastEmail,
+      lastAnyActivity: lastAny,
+      daysSinceLastActivity: daysBetween(lastAny, nowMs)
+    }
+  };
+}
+
+async function listDormantMatters(
+  deps: ActionStepExecutorDeps,
+  account: ConnectedAccountRecord,
+  input: Record<string, unknown>
+): Promise<NormalizedToolResponse> {
+  const days = readNumber(input, "days") ?? 14;
+  const status = readString(input, "status") ?? "active";
+  const assignedTo = readNumber(input, "assigned_to_participant_id");
+
+  const index = await buildMatterActivityIndex(deps, account, {
+    days,
+    status,
+    assignedTo,
+    signals: ["time"]
+  });
+
+  const nowMs = Date.now();
+  const full = isFullPayload(input);
+  const dormant = index.matters
+    .filter((matter) => {
+      const id = matter.id !== undefined ? String(matter.id) : "";
+      if (!id) return false;
+      const activity = index.activityByMatterId.get(id);
+      return !activity || activity.timeEntryCount === 0;
+    })
+    .map((matter) => {
+      const id = String(matter.id);
+      return decorateMatterWithActivity(matter, index.activityByMatterId.get(id), ["time"], nowMs, full);
+    });
+
+  const scope = assignedTo ? ` assigned to participant ${assignedTo}` : "";
+  return {
+    summary:
+      `Found ${dormant.length} ${status} matter${dormant.length === 1 ? "" : "s"}${scope} with no time recorded ` +
+      `since ${index.windowStart} (scanned ${index.matters.length} matter${index.matters.length === 1 ? "" : "s"}).` +
+      buildTruncationNote(index),
+    data: dormant,
+    source: SOURCE
+  };
+}
+
+async function listQuietMatters(
+  deps: ActionStepExecutorDeps,
+  account: ConnectedAccountRecord,
+  input: Record<string, unknown>
+): Promise<NormalizedToolResponse> {
+  const days = readNumber(input, "days") ?? 14;
+  const status = readString(input, "status") ?? "active";
+  const assignedTo = readNumber(input, "assigned_to_participant_id");
+
+  const rawSignals = input["signals"];
+  const allowed: ActivitySignal[] = ["time", "file_notes", "emails"];
+  const signals: ActivitySignal[] = Array.isArray(rawSignals)
+    ? (rawSignals.filter((s): s is ActivitySignal => typeof s === "string" && (allowed as string[]).includes(s)))
+    : allowed;
+  const effectiveSignals: ActivitySignal[] = signals.length > 0 ? signals : allowed;
+
+  const index = await buildMatterActivityIndex(deps, account, {
+    days,
+    status,
+    assignedTo,
+    signals: effectiveSignals
+  });
+
+  const nowMs = Date.now();
+  const full = isFullPayload(input);
+  const quiet = index.matters
+    .filter((matter) => {
+      const id = matter.id !== undefined ? String(matter.id) : "";
+      if (!id) return false;
+      const activity = index.activityByMatterId.get(id);
+      if (!activity) return true;
+      if (effectiveSignals.includes("time") && activity.timeEntryCount > 0) return false;
+      if (effectiveSignals.includes("file_notes") && activity.fileNoteCount > 0) return false;
+      if (effectiveSignals.includes("emails") && activity.emailCount > 0) return false;
+      return true;
+    })
+    .map((matter) => {
+      const id = String(matter.id);
+      return decorateMatterWithActivity(matter, index.activityByMatterId.get(id), effectiveSignals, nowMs, full);
+    });
+
+  const scope = assignedTo ? ` assigned to participant ${assignedTo}` : "";
+  return {
+    summary:
+      `Found ${quiet.length} ${status} matter${quiet.length === 1 ? "" : "s"}${scope} with no activity across ` +
+      `[${effectiveSignals.join(", ")}] since ${index.windowStart} (scanned ${index.matters.length} matter${index.matters.length === 1 ? "" : "s"}).` +
+      buildTruncationNote(index),
+    data: quiet,
+    source: SOURCE
+  };
+}
+
+async function getMatterActivitySummary(
+  deps: ActionStepExecutorDeps,
+  account: ConnectedAccountRecord,
+  input: Record<string, unknown>
+): Promise<NormalizedToolResponse> {
+  const days = readNumber(input, "days") ?? 14;
+  const status = readString(input, "status") ?? "active";
+  const assignedTo = readNumber(input, "assigned_to_participant_id");
+  const signals: ActivitySignal[] = ["time", "file_notes", "emails"];
+
+  const index = await buildMatterActivityIndex(deps, account, {
+    days,
+    status,
+    assignedTo,
+    signals
+  });
+
+  const nowMs = Date.now();
+  const full = isFullPayload(input);
+  const decorated = index.matters
+    .map((matter) => {
+      const id = matter.id !== undefined ? String(matter.id) : "";
+      const activity = id ? index.activityByMatterId.get(id) : undefined;
+      return decorateMatterWithActivity(matter, activity, signals, nowMs, full);
+    })
+    .sort((a, b) => {
+      const aLast =
+        ((a.activityInWindow as Record<string, unknown> | undefined)?.lastAnyActivity as string | undefined) ?? "";
+      const bLast =
+        ((b.activityInWindow as Record<string, unknown> | undefined)?.lastAnyActivity as string | undefined) ?? "";
+      return bLast.localeCompare(aLast);
+    });
+
+  const scope = assignedTo ? ` for participant ${assignedTo}` : "";
+  return {
+    summary:
+      `Activity summary${scope}: ${decorated.length} ${status} matter${decorated.length === 1 ? "" : "s"} ` +
+      `with counts since ${index.windowStart}, sorted by most-recent activity first.` +
+      buildTruncationNote(index),
+    data: decorated,
+    source: SOURCE
+  };
+}
+
 async function getMatterSummary(
   deps: ActionStepExecutorDeps,
   account: ConnectedAccountRecord,
@@ -917,6 +1272,12 @@ export async function executeActionStepTool(
       return listFileNotes(deps, account, input);
     case "list_matter_emails":
       return listEmails(deps, account, input);
+    case "list_dormant_matters":
+      return listDormantMatters(deps, account, input);
+    case "list_quiet_matters":
+      return listQuietMatters(deps, account, input);
+    case "get_matter_activity_summary":
+      return getMatterActivitySummary(deps, account, input);
     default:
       throw new Error(`Unknown ActionStep tool: ${toolName}`);
   }

@@ -530,88 +530,25 @@ async function listParticipants(
     participantType
   };
 
-  let fetched: Record<string, unknown>[];
-
-  // ActionStep stores names split across firstName / lastName / displayName, and
-  // displayName is often "Last, First" rather than "First Last". A single
-  // displayName wildcard search misses real records. When the query looks like
-  // a full name (has whitespace), fan out across the likely shapes and merge.
-  const queryParts = rawQuery ? rawQuery.split(/\s+/).filter(Boolean) : [];
-  const isMultiWordName = queryParts.length >= 2 && !email && !participantType;
-
-  const variantDiagnostics: string[] = [];
-
-  if (rawQuery && isMultiWordName) {
-    const firstName = queryParts[0];
-    const lastName = queryParts[queryParts.length - 1];
-    const reversed = `${lastName}, ${firstName}`;
-
-    const variants: { label: string; filter: { displayName?: string; firstName?: string; lastName?: string } }[] = [
-      { label: `displayName=*${rawQuery}*`, filter: { displayName: wrapWildcard(rawQuery) } },
-      { label: `displayName=*${reversed}*`, filter: { displayName: wrapWildcard(reversed) } },
-      { label: `lastName=*${lastName}* & firstName=*${firstName}*`, filter: { lastName: wrapWildcard(lastName), firstName: wrapWildcard(firstName) } },
-      { label: `displayName=*${lastName}*`, filter: { displayName: wrapWildcard(lastName) } },
-      { label: `lastName=*${lastName}*`, filter: { lastName: wrapWildcard(lastName) } }
-    ];
-
-    const responses = await Promise.allSettled(
-      variants.map((variant) =>
-        fetchWithRefresh(
-          deps,
-          account,
-          buildUrl(endpoint, "/api/rest/participants", {
-            page,
-            pageSize,
-            ...sharedFilters,
-            ...variant.filter
-          })
-        )
-      )
-    );
-
-    const merged = new Map<string, Record<string, unknown>>();
-    responses.forEach((result, index) => {
-      const variant = variants[index];
-      if (result.status !== "fulfilled") {
-        const reason = result.reason instanceof Error ? result.reason.message : String(result.reason);
-        variantDiagnostics.push(`${variant.label} → ERROR: ${reason.slice(0, 140)}`);
-        return;
-      }
-      const records = pickCollection(result.value.payload, "participants");
-      variantDiagnostics.push(`${variant.label} → ${records.length}`);
-      for (const participant of records) {
-        const id = participant.id !== undefined ? String(participant.id) : JSON.stringify(participant);
-        if (!merged.has(id)) merged.set(id, participant);
-      }
-    });
-    fetched = [...merged.values()];
-  } else {
-    const url = buildUrl(endpoint, "/api/rest/participants", {
-      page,
-      pageSize,
-      displayName: rawQuery ? wrapWildcard(rawQuery) : undefined,
-      ...sharedFilters
-    });
-    const { payload } = await fetchWithRefresh(deps, account, url);
-    fetched = pickCollection(payload, "participants");
-  }
+  // ActionStep's participants endpoint does substring matching by default;
+  // wrapping with `*` makes it search for literal asterisks and returns 0.
+  const url = buildUrl(endpoint, "/api/rest/participants", {
+    page,
+    pageSize,
+    displayName: rawQuery,
+    ...sharedFilters
+  });
+  const { payload } = await fetchWithRefresh(deps, account, url);
+  const fetched = pickCollection(payload, "participants");
 
   const filtered = isPhoneSearch
     ? fetched.filter((participant) => participantMatchesPhone(participant, phoneDigits))
     : fetched;
 
   const summaryBase = `Found ${filtered.length} participant${filtered.length === 1 ? "" : "s"} in ActionStep`;
-  let summary: string;
-  if (isPhoneSearch) {
-    summary = `${summaryBase} matching phone "${phoneQuery}" (out of ${fetched.length} on this page).`;
-  } else if (isMultiWordName) {
-    summary = `${summaryBase} matching "${rawQuery}" across displayName / first+last / last-name-only variants.`;
-    if (filtered.length === 0 && variantDiagnostics.length > 0) {
-      summary += ` Variant attempts: ${variantDiagnostics.join("; ")}.`;
-    }
-  } else {
-    summary = `${summaryBase}.`;
-  }
+  const summary = isPhoneSearch
+    ? `${summaryBase} matching phone "${phoneQuery}" (out of ${fetched.length} on this page).`
+    : `${summaryBase}${rawQuery ? ` matching displayName containing "${rawQuery}"` : ""}.`;
 
   return {
     summary,

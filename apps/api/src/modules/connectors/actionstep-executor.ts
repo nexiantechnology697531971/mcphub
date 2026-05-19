@@ -1312,8 +1312,8 @@ async function getClientBrief(
     ? rawInclude.filter((value): value is IncludeOption =>
         typeof value === "string" && (allowedInclude as readonly string[]).includes(value)
       )
-    : ["file_notes", "time_entries"];
-  const effectiveInclude: IncludeOption[] = include.length > 0 ? include : ["file_notes", "time_entries"];
+    : ["file_notes", "time_entries", "emails"];
+  const effectiveInclude: IncludeOption[] = include.length > 0 ? include : ["file_notes", "time_entries", "emails"];
 
   const wantNotes = effectiveInclude.includes("file_notes");
   const wantTime = effectiveInclude.includes("time_entries");

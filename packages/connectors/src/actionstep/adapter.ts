@@ -354,7 +354,7 @@ const clientBriefSchema = z.object({
   include: z
     .array(z.enum(["file_notes", "time_entries", "emails"]))
     .min(1)
-    .describe("Which activity feeds to bundle per matter. Default `['file_notes','time_entries']`. Add `'emails'` for full correspondence prep — heavier but more complete.")
+    .describe("Which activity feeds to bundle per matter. Default `['file_notes','time_entries','emails']` — comprehensive brief covering everything that happened on the client's files. Drop `'emails'` if the user only wants the internal-work view (file notes + time), or pass a single value for a narrower slice.")
     .optional(),
   include_full: z.boolean().describe(includeFullDescription).optional()
 });
@@ -525,7 +525,7 @@ export const actionStepAdapter: ProviderAdapter = {
       ),
       scaffold(
         "get_client_brief",
-        "Generate a client meeting prep brief: every matter the participant is involved in (via `actionparticipants`), plus recent file notes, time records and (optionally) emails per matter over the lookback window. Use when the user asks 'summarise all matters and communications for X', 'prep me for a meeting with ABC Ltd', 'what's been happening across this client's files', or 'give me a 2-year picture of this client'. Returns one bundle per matter with totals (billable hours, note count, etc.).",
+        "Generate a comprehensive client meeting prep brief: every matter the participant is involved in (via `actionparticipants`), plus file notes, time records and emails per matter over the lookback window. STRONG MATCH for: 'summarise all matters and communications for ABC Ltd', 'prep me for a meeting with X', 'what's been happening across this client's files', 'give me a 2-year picture of this client', 'overview of everything for X'. REQUIRED FLOW: when the user names a client (e.g. 'ABC Ltd', 'Jane Doe'), first call `search_participants` with that name to resolve the participant ID, then call this tool with that ID. Convert the user's natural-language window ('last 2 years' → days=730, 'last year' → 365, 'last 6 months' → 180). Default `include` covers file_notes + time_entries + emails so 'communications' is captured out of the box. Returns one bundle per matter with grand totals (billable hours, note count, email count).",
         clientBriefSchema
       )
     ];
